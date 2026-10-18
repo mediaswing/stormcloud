@@ -234,6 +234,7 @@ jobs:
           name: windows
           path: dist/*.msi
           if-no-files-found: error
+          retention-days: 21
 
   linux:
     name: Ubuntu .deb (amd64)
@@ -274,6 +275,7 @@ jobs:
           name: linux
           path: dist/*.deb
           if-no-files-found: error
+          retention-days: 21
 
   macos:
     name: macOS .pkg (Apple Silicon)
@@ -306,6 +308,7 @@ jobs:
           name: macos
           path: dist/*.pkg
           if-no-files-found: error
+          retention-days: 21
 
   release:
     name: Publish release
