@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Windows Installer package (.msi) for Graphical Cloud Management, built with WiX Toolset 6
+  by the windows job in .github/workflows/release.yml. It installs the
+  files the workflow copies into its staging folder.
+
+  Variables, given with -d on the wix build command line:
+    Version      The version, from the tag (for example 1.0.0).
+    StageDir     The folder holding stormcloud.exe, LICENSE.txt, fonts-OFL.txt,
+                 icon-CREDITS.txt and the Visual C++ runtime DLLs.
+    RuntimeDlls  The Visual C++ runtime DLLs in StageDir, separated by
+                 semicolons. The list comes from the exe's imports, so it can
+                 change between releases.
+
+  The app is installed for the current user only, in
+  %LOCALAPPDATA%\Programs\Graphical Cloud Management, so no administrator rights are needed.
+  Its settings, sign-in token and log live in %APPDATA%\StormCloud, and the
+  installer never touches them, so they are kept through upgrades and
+  uninstalling.
+
+  Files under the user's profile can't be the key path of a component (ICE38),
+  so each component has a registry value under
+  HKEY_CURRENT_USER\Software\StormCloud\Installer as its key path instead.
+  WiX can't generate GUIDs for components like that, so each has a fixed GUID
+  written here. Never change them.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <!--
+    Never change the UpgradeCode: it is how a new version finds and replaces
+    the one already installed.
+  -->
+  <Package
+      Name="Graphical Cloud Management"
+      Manufacturer="The Graphical Cloud Management contributors"
+      Version="$(var.Version)"
+      UpgradeCode="50EC9765-A446-48A4-9E10-FAF4883C493F"
+      Scope="perUser"
+      Language="1033">
+
+    <!--
+      The old version is removed before the new one is installed. Same-version
+      upgrades are allowed so that a rebuilt package replaces the installed one
+      rather than appearing a second time in the installed apps list.
+    -->
+    <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of [ProductName] is already installed. To install this one, first uninstall the newer version from Installed apps in Windows Settings." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Shown in the installed apps list. -->
+    <Property Id="ARPCOMMENTS" Value="Graphical Cloud Management: a console for managing Microsoft Entra ID" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/mediaswing/stormcloud" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/mediaswing/stormcloud/issues" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/mediaswing/stormcloud/releases" />
+    <Icon Id="StormCloudIcon" SourceFile="assets\icon\stormcloud.ico" />
+    <Property Id="ARPPRODUCTICON" Value="StormCloudIcon" />
+    <!-- There are no options to change, so offer only Repair and Remove. -->
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <!-- Upgrade into the folder the previous version was installed in. -->
+    <Property Id="INSTALLFOLDER">
+      <RegistrySearch Id="PreviousInstallFolder" Root="HKCU" Key="Software\StormCloud\Installer" Name="InstallFolder" Type="raw" />
+    </Property>
+    <!--
+      Versions before the rename to Graphical Cloud Management installed into
+      "Graphical Cloud Manager". An upgrade from that default folder moves to
+      the new one; the old version's files and folder are removed with it.
+    -->
+    <SetProperty Id="OLDDEFAULTFOLDER" Value="[LocalAppDataFolder]Programs\Graphical Cloud Manager\" Before="AppSearch" Sequence="both" />
+    <SetProperty Id="INSTALLFOLDER" Value="[LocalAppDataFolder]Programs\Graphical Cloud Management\" After="AppSearch" Sequence="both" Condition="INSTALLFOLDER ~= OLDDEFAULTFOLDER" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Graphical Cloud Management" />
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Component Id="AppExe" Guid="FA544667-6190-4BC3-A5BD-2D1B33D6A4AA">
+        <File Id="StormCloudExe" Source="$(var.StageDir)\stormcloud.exe" KeyPath="no" />
+        <!-- A single Start menu shortcut, not in a folder. No desktop shortcut. -->
+        <Shortcut
+            Id="StormCloudShortcut"
+            Directory="ProgramMenuFolder"
+            Name="Graphical Cloud Management"
+            Description="Console for managing Microsoft Entra ID"
+            Target="[#StormCloudExe]"
+            WorkingDirectory="INSTALLFOLDER" />
+        <!-- The installer's own key, removed with the app. The app's settings are not in it. -->
+        <RegistryKey Root="HKCU" Key="Software\StormCloud\Installer" ForceDeleteOnUninstall="yes">
+          <RegistryValue Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        </RegistryKey>
+        <!-- Each folder goes only if it is empty, so other apps' folders in Programs are safe. -->
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
+      </Component>
+
+      <!-- The GNU General Public License, version 3, which the app is released under. -->
+      <Component Id="Licence" Guid="3DBEE0EF-A7B6-43E0-9093-0F8237892878">
+        <File Id="LicenseTxt" Source="$(var.StageDir)\LICENSE.txt" KeyPath="no" />
+        <RegistryValue Root="HKCU" Key="Software\StormCloud\Installer" Name="LICENSE.txt" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <!-- The fonts are compiled into the exe, so their licence must travel with it. -->
+      <Component Id="FontLicence" Guid="56B5267F-403D-4C6C-AE25-FD168723FCDF">
+        <File Id="FontsOflTxt" Source="$(var.StageDir)\fonts-OFL.txt" KeyPath="no" />
+        <RegistryValue Root="HKCU" Key="Software\StormCloud\Installer" Name="fonts-OFL.txt" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <!-- The app icon is CC BY 4.0, which requires its credit to travel with it. -->
+      <Component Id="IconCredits" Guid="7D5AD270-3DFC-4FF4-973C-3EEB1058338B">
+        <File Id="IconCreditsTxt" Source="$(var.StageDir)\icon-CREDITS.txt" KeyPath="no" />
+        <RegistryValue Root="HKCU" Key="Software\StormCloud\Installer" Name="icon-CREDITS.txt" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <!--
+        The Visual C++ runtime, so the app runs without the Redistributable.
+        Which DLLs it needs can change between releases, so they share one
+        component. That is safe because an upgrade removes the old version
+        completely before installing the new one.
+      -->
+      <Component Id="VisualCppRuntime" Guid="6D12C334-CF6C-4086-95EC-FAD507F542A3">
+        <?foreach Dll in $(var.RuntimeDlls)?>
+        <File Id="RuntimeDll_$(var.Dll)" Source="$(var.StageDir)\$(var.Dll)" KeyPath="no" />
+        <?endforeach?>
+        <RegistryValue Root="HKCU" Key="Software\StormCloud\Installer" Name="VisualCppRuntime" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="StormCloud" Title="Graphical Cloud Management" AllowAbsent="no" AllowAdvertise="no">
+      <ComponentGroupRef Id="AppFiles" />
+    </Feature>
+
+    <UIRef Id="StormCloudUI" />
+  </Package>
+
+  <!--
+    The standard WixUI dialogs, in the order of WixUI_Minimal but with the
+    welcome page instead of the licence agreement: Welcome, Ready to install,
+    progress, Finished. Running the MSI again offers Repair or Remove.
+    They are ordinary Windows Installer dialogs, so they work from the
+    keyboard (Tab, Space, Enter, Escape) and with screen readers.
+  -->
+  <Fragment>
+    <UI Id="StormCloudUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <DialogRef Id="CancelDlg" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="WelcomeDlg" />
+
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" />
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="1" Condition="NOT Installed" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2" Condition="Installed" />
+
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
+
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
+    </UI>
+
+    <UIRef Id="WixUI_Common" />
+  </Fragment>
+</Wix>

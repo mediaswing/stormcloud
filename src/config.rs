@@ -1,0 +1,158 @@
+//! Settings persisted to `settings.ini` in the per-user configuration folder:
+//! `%APPDATA%\StormCloud` on Windows, `~/Library/Application Support/StormCloud`
+//! on macOS and `$XDG_CONFIG_HOME/stormcloud` (usually `~/.config`) on Linux.
+
+use anyhow::{Context, Result};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
+
+pub const DEFAULT_SCOPES: &str = "User.ReadWrite.All Group.ReadWrite.All Device.ReadWrite.All \
+Directory.Read.All RoleManagement.ReadWrite.Directory Organization.Read.All \
+LicenseAssignment.ReadWrite.All User-PasswordProfile.ReadWrite.All";
+
+#[derive(Clone, Debug)]
+pub struct Settings {
+    pub tenant_id: String,
+    pub client_id: String,
+    /// Keep the refresh token on disk between runs.
+    pub remember_sign_in: bool,
+    pub scopes: String,
+    pub authority_host: String,
+    pub graph_endpoint: String,
+    /// off, error, warn, info, debug or trace.
+    pub log_level: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            tenant_id: String::new(),
+            client_id: String::new(),
+            remember_sign_in: false,
+            scopes: DEFAULT_SCOPES.to_string(),
+            authority_host: "https://login.microsoftonline.com".to_string(),
+            graph_endpoint: "https://graph.microsoft.com".to_string(),
+            log_level: "debug".to_string(),
+        }
+    }
+}
+
+pub fn config_dir() -> PathBuf {
+    let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    if cfg!(target_os = "linux") {
+        base.join("stormcloud")
+    } else {
+        base.join("StormCloud")
+    }
+}
+
+pub fn settings_path() -> PathBuf {
+    config_dir().join("settings.ini")
+}
+
+pub fn token_path() -> PathBuf {
+    config_dir().join("token.json")
+}
+
+impl Settings {
+    pub fn is_complete(&self) -> bool {
+        !self.tenant_id.trim().is_empty() && !self.client_id.trim().is_empty()
+    }
+
+    pub fn load() -> Result<Settings> {
+        let path = settings_path();
+        let mut s = Settings::default();
+        let Ok(text) = fs::read_to_string(&path) else {
+            return Ok(s);
+        };
+        let ini = parse_ini(&text);
+        let get = |sec: &str, key: &str| ini.get(&(sec.to_string(), key.to_string())).cloned();
+        if let Some(v) = get("auth", "tenant_id") {
+            s.tenant_id = v;
+        }
+        if let Some(v) = get("auth", "client_id") {
+            s.client_id = v;
+        }
+        if let Some(v) = get("auth", "remember_sign_in") {
+            s.remember_sign_in = matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "1");
+        }
+        if let Some(v) = get("auth", "scopes").filter(|v| !v.is_empty()) {
+            s.scopes = v;
+        }
+        if let Some(v) = get("cloud", "authority_host").filter(|v| !v.is_empty()) {
+            s.authority_host = v.trim_end_matches('/').to_string();
+        }
+        if let Some(v) = get("cloud", "graph_endpoint").filter(|v| !v.is_empty()) {
+            s.graph_endpoint = v.trim_end_matches('/').to_string();
+        }
+        if let Some(v) = get("logging", "level").filter(|v| !v.is_empty()) {
+            s.log_level = v;
+        }
+        Ok(s)
+    }
+
+    pub fn save(&self) -> Result<PathBuf> {
+        let dir = config_dir();
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let path = settings_path();
+        let text = format!(
+            "; Graphical Cloud Management settings\n\
+             ; The app registration must allow public client flows (device code).\n\
+             [auth]\n\
+             tenant_id = {}\n\
+             client_id = {}\n\
+             remember_sign_in = {}\n\
+             ; Space-separated delegated Microsoft Graph permissions to request.\n\
+             scopes = {}\n\
+             \n\
+             [cloud]\n\
+             authority_host = {}\n\
+             graph_endpoint = {}\n\
+             \n\
+             [logging]\n\
+             ; Written to output.log in this folder: off, error, warn, info, debug or trace.\n\
+             level = {}\n",
+            self.tenant_id.trim(),
+            self.client_id.trim(),
+            self.remember_sign_in,
+            self.scopes.trim(),
+            self.authority_host,
+            self.graph_endpoint,
+            self.log_level.trim(),
+        );
+        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        Ok(path)
+    }
+}
+
+fn parse_ini(text: &str) -> BTreeMap<(String, String), String> {
+    let mut out = BTreeMap::new();
+    let mut section = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].trim().to_ascii_lowercase();
+        } else if let Some((k, v)) = line.split_once('=') {
+            let v = v.trim().trim_matches('"').to_string();
+            out.insert((section.clone(), k.trim().to_ascii_lowercase()), v);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_sections_and_comments() {
+        let ini = parse_ini("; c\n[Auth]\nTenant_ID = abc\nclient_id=\"def\"\n[cloud]\nx = 1\n");
+        assert_eq!(ini[&("auth".into(), "tenant_id".into())], "abc");
+        assert_eq!(ini[&("auth".into(), "client_id".into())], "def");
+        assert_eq!(ini[&("cloud".into(), "x".into())], "1");
+    }
+}

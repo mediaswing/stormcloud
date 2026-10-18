@@ -1,0 +1,23 @@
+[package]
+name = "stormcloud"
+version = "1.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "A console for managing Microsoft Entra ID, in the style of a classic MMC snap-in"
+repository = "https://github.com/mediaswing/stormcloud"
+
+[dependencies]
+anyhow = "1.0.104"
+csv = "1.4.0"
+dirs = "7.0.0"
+eframe = "0.36.2"
+egui_extras = "0.36.2"
+getrandom = "0.4.3"
+log = "0.4.34"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "rustls", "form"] }
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[target."cfg(windows)".build-dependencies]
+winresource = "0.1.34"

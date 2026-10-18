@@ -1,0 +1,10 @@
+The Graphical Cloud Management app icon
+
+The icon is the safe icon by IconMarket, from the Casino pack:
+https://icon-icons.com/pack/casino/4016
+
+It is licensed under the Creative Commons Attribution 4.0 International
+licence (CC BY 4.0): https://creativecommons.org/licenses/by/4.0/
+
+Changes: the SVG was converted to PNG, ICO and ICNS images at several sizes
+for use as the app icon.
