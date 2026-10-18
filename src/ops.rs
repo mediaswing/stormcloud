@@ -24,6 +24,7 @@ pub enum Act {
     AssignToUser,
     Delete,
     ExportList,
+    ExportDatabase,
     ImportUsers,
     ImportMembers,
 }
@@ -44,21 +45,21 @@ impl Act {
             Act::AssignRole => vec![cmd(Key::R)],
             Act::AssignToUser => vec![cmd(Key::U)],
             Act::Delete => vec![KeyboardShortcut::new(Modifiers::NONE, Key::Delete), cmd(Key::Backspace)],
-            Act::ExportList | Act::ImportUsers | Act::ImportMembers => vec![],
+            Act::ExportList | Act::ExportDatabase | Act::ImportUsers | Act::ImportMembers => vec![],
         }
     }
 
     pub fn needs_selection(self) -> bool {
-        !matches!(self, Act::Refresh | Act::New | Act::ExportList | Act::ImportUsers)
+        !matches!(self, Act::Refresh | Act::New | Act::ExportList | Act::ExportDatabase | Act::ImportUsers)
     }
 }
 
 /// Actions that apply to the node itself (shown at the top of the Actions pane).
 pub fn node_actions(node: Node) -> Vec<Act> {
     match node {
-        Node::Users => vec![Act::New, Act::ImportUsers, Act::ExportList, Act::Refresh],
-        Node::Groups => vec![Act::New, Act::ExportList, Act::Refresh],
-        Node::Devices | Node::Licences => vec![Act::ExportList, Act::Refresh],
+        Node::Users => vec![Act::New, Act::ImportUsers, Act::ExportList, Act::ExportDatabase, Act::Refresh],
+        Node::Groups => vec![Act::New, Act::ExportList, Act::ExportDatabase, Act::Refresh],
+        Node::Devices | Node::Licences => vec![Act::ExportList, Act::ExportDatabase, Act::Refresh],
         Node::Root => vec![],
     }
 }
@@ -114,6 +115,7 @@ impl App {
             Act::AssignToUser => "Assign to user…".into(),
             Act::Delete => "Delete".into(),
             Act::ExportList => "Export list…".into(),
+            Act::ExportDatabase => "Export to MariaDB…".into(),
             Act::ImportUsers => "Import users from CSV…".into(),
             Act::ImportMembers => "Add members from CSV…".into(),
         }
@@ -176,6 +178,7 @@ impl App {
             }
             Act::Delete => self.delete_obj(node, id, name),
             Act::ExportList => self.export_list(),
+            Act::ExportDatabase => self.export_database(),
             Act::ImportUsers => self.import_users(),
             Act::ImportMembers => self.import_members(obj),
         }
@@ -243,6 +246,9 @@ impl App {
                 }
                 if reconnect {
                     app.sign_out();
+                } else if let Some(g) = &app.graph {
+                    // The running sign-in keeps its own copy of the settings.
+                    g.auth.set_remember(new.remember_sign_in);
                 }
                 app.settings = new;
                 if reconnect {
@@ -613,6 +619,11 @@ pub fn generate_password() -> String {
         let j = rnd[16 + i] as usize % (i + 1);
         chars.swap(i, j);
     }
+    // A leading - + or = would be saved with an apostrophe in front in a CSV file (see
+    // bulk::escape_cell), and that copy of the password would then be wrong.
+    if let Some(i) = chars.iter().position(u8::is_ascii_alphanumeric) {
+        chars.swap(0, i);
+    }
     String::from_utf8(chars).unwrap_or_default()
 }
 
@@ -641,13 +652,14 @@ mod tests {
 
     #[test]
     fn passwords_have_all_classes() {
-        for _ in 0..20 {
+        for _ in 0..500 {
             let p = generate_password();
             assert_eq!(p.len(), 16);
             assert!(p.chars().any(|c| c.is_ascii_uppercase()));
             assert!(p.chars().any(|c| c.is_ascii_lowercase()));
             assert!(p.chars().any(|c| c.is_ascii_digit()));
             assert!(p.chars().any(|c| !c.is_ascii_alphanumeric()));
+            assert!(p.starts_with(|c: char| c.is_ascii_alphanumeric()), "{p}");
         }
     }
 

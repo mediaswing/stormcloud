@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Upper bound on objects fetched for a single list, to keep huge tenants responsive.
-const MAX_ITEMS: usize = 20_000;
+pub const MAX_ITEMS: usize = 20_000;
 
 pub struct Graph {
     pub auth: Arc<Auth>,
@@ -87,15 +87,20 @@ impl Graph {
 
     /// GET a collection, following `@odata.nextLink`.
     pub fn list(&self, path: &str) -> Result<Vec<Value>> {
+        self.list_inner(path, false).map(|(items, _)| items)
+    }
+
+    /// Like [`Graph::list`], also saying whether the list stopped at [`MAX_ITEMS`] with more to come.
+    pub fn list_capped(&self, path: &str) -> Result<(Vec<Value>, bool)> {
         self.list_inner(path, false)
     }
 
     /// GET a collection using advanced query capabilities (`ConsistencyLevel: eventual`).
     pub fn list_advanced(&self, path: &str) -> Result<Vec<Value>> {
-        self.list_inner(path, true)
+        self.list_inner(path, true).map(|(items, _)| items)
     }
 
-    fn list_inner(&self, path: &str, eventual: bool) -> Result<Vec<Value>> {
+    fn list_inner(&self, path: &str, eventual: bool) -> Result<(Vec<Value>, bool)> {
         let mut out = Vec::new();
         let mut next = Some(path.to_string());
         while let Some(p) = next.take() {
@@ -103,11 +108,12 @@ impl Graph {
             if let Some(items) = v["value"].as_array() {
                 out.extend(items.iter().cloned());
             }
-            if out.len() < MAX_ITEMS {
-                next = v["@odata.nextLink"].as_str().map(str::to_string);
+            next = v["@odata.nextLink"].as_str().map(str::to_string);
+            if next.is_some() && out.len() >= MAX_ITEMS {
+                return Ok((out, true));
             }
         }
-        Ok(out)
+        Ok((out, false))
     }
 
     pub fn post(&self, path: &str, body: &Value) -> Result<Value> {

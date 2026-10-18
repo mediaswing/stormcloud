@@ -48,6 +48,13 @@ graph_endpoint = https://graph.microsoft.com
 
 [logging]
 level = debug
+
+[mariadb]
+host = db.contoso.local
+port = 3306
+user = stormcloud
+database = entra
+tls = true
 ```
 
 Edit it from **File › Settings…** or by hand. With `remember_sign_in = true` the refresh token is
@@ -87,6 +94,28 @@ Before an import changes anything, every row is shown with the problems that wil
 skipped, such as a missing name, a domain the tenant hasn't verified or a user who already exists.
 When it finishes, **Save results…** writes what happened to each row. The results of a user import
 include the initial passwords, so keep the file safe and delete it once they've been passed on.
+
+## Exporting to MariaDB
+
+**Export to MariaDB…** in the Action menu saves the current list to a table on a MariaDB server
+(MariaDB 10.0.2 or later; MySQL is not supported, as the export uses `ADD COLUMN IF NOT EXISTS`).
+Like a CSV export it saves what's on screen, so filter first to export part of a list.
+
+- The table is created if it doesn't exist (`utf8mb4`), with the object's ID (`object_id`, or
+  `sku_id` for licences) as the primary key, a `TEXT` column for each column shown, named from its
+  header (`Last sign-in` becomes `last_sign_in`), and `exported_at`, the UTC time of the export.
+- The table name suggested is `entra_users`, `entra_groups` and so on. An existing table is only
+  used if an earlier export made it (it has the ID and `exported_at` columns), so a table that
+  belongs to something else is never changed.
+- Exporting again updates rows by ID and adds any new rows. Tick **Remove rows for objects not in
+  this list** to also delete rows the export didn't include, making the table a copy of the list.
+  This is refused while the list is loading, if it failed to load, if it is empty, or if it
+  stopped at 20,000 objects, as rows for objects that still exist would be deleted.
+- The rows are written in one transaction: if anything fails, the table is left as it was.
+- The account needs `CREATE`, `ALTER`, `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the database.
+
+The server, port, user name, database and TLS setting are remembered in the `[mariadb]` section
+of `settings.ini`. The password is asked for each time and never saved.
 
 ## Logging
 

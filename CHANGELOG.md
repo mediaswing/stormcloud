@@ -4,6 +4,26 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Export to MariaDB:** Export to MariaDB… saves the current list to a table on a MariaDB server,
+  creating the table if needed and updating rows by object ID on later exports. The connection is
+  remembered, apart from the password.
+
+### Fixed
+
+- Turning off "Remember sign-in" now takes effect straight away. Before, the sign-in was saved to
+  disk again at the next token refresh, and turning it on did nothing until a restart.
+- The selection no longer moves to a different object when the list is refreshed.
+- A list still loading when you signed out or changed tenant could appear afterwards, under the
+  new sign-in.
+- Generated passwords no longer start with `-`, `+` or `=`, which were saved with an apostrophe in
+  front in the import results file.
+- A temporary error from the Microsoft sign-in service no longer discards the saved sign-in.
+- A list that stops at 20,000 objects now says so in the status bar.
+
 ## [1.0.0] - 2026-10-18
 
 The first release: a desktop console for Microsoft Entra ID, laid out like a classic MMC snap-in,

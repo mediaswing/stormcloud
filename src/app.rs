@@ -50,11 +50,16 @@ pub struct App {
     pub data: HashMap<Node, Vec<Value>>,
     loading: HashSet<Node>,
     errors: HashMap<Node, String>,
+    /// Lists that stopped at [`MAX_ITEMS`] with more objects to come.
+    truncated: HashSet<Node>,
     filter: String,
     sort: Option<(usize, bool)>,
     view: Vec<usize>,
     view_dirty: bool,
     sel: Option<usize>,
+    /// The selected object's ID, taken before the current list's data changed, as the view's
+    /// indices no longer match the data until it is rebuilt.
+    sel_before_change: Option<Option<Value>>,
 
     pane: Pane,
     focus_pane: Option<Pane>,
@@ -132,11 +137,13 @@ impl App {
             data: HashMap::new(),
             loading: HashSet::new(),
             errors: HashMap::new(),
+            truncated: HashSet::new(),
             filter: String::new(),
             sort: None,
             view: Vec::new(),
             view_dirty: true,
             sel: None,
+            sel_before_change: None,
             pane: Pane::Tree,
             focus_pane: Some(Pane::Tree),
             scroll_to_sel: false,
@@ -243,9 +250,19 @@ impl App {
         let auth = Arc::new(Auth::new(self.settings.clone(), http.clone()));
         self.graph = Some(Arc::new(Graph::new(auth, http, &self.settings.graph_endpoint)));
         self.signed_in = false;
-        self.data.retain(|n, _| n.endpoint().is_none());
-        self.view_dirty = true;
+        self.clear_lists();
         self.sign_in();
+    }
+
+    /// Forgets the lists loaded from Graph. Loads still running finish under an older
+    /// `signin_gen`, so their results are dropped.
+    fn clear_lists(&mut self) {
+        self.data.retain(|n, _| n.endpoint().is_none());
+        self.loading.clear();
+        self.errors.clear();
+        self.truncated.clear();
+        self.sel_before_change = None;
+        self.view_dirty = true;
     }
 
     pub fn sign_in(&mut self) {
@@ -347,8 +364,7 @@ impl App {
         self.signed_in = false;
         self.account.clear();
         self.tenant_name.clear();
-        self.data.retain(|n, _| n.endpoint().is_none());
-        self.view_dirty = true;
+        self.clear_lists();
         self.status = "Signed out".into();
     }
 
@@ -363,6 +379,7 @@ impl App {
         self.filter.clear();
         self.sort = None;
         self.sel = None;
+        self.sel_before_change = None;
         self.view_dirty = true;
         if node.endpoint().is_some() && !self.data.contains_key(&node) {
             self.load(node);
@@ -382,18 +399,34 @@ impl App {
             return;
         }
         self.loading.insert(node);
+        let session = self.signin_gen;
         self.spawn(
             format!("Loading {}…", node.title().to_lowercase()),
-            move |g| g.list(path),
+            move |g| g.list_capped(path),
             move |app, r| {
+                if session != app.signin_gen {
+                    log::debug!("Dropping {} loaded before signing out", node.title());
+                    return;
+                }
                 app.loading.remove(&node);
                 match r {
-                    Ok(mut rows) => {
+                    Ok((mut rows, truncated)) => {
                         let first = node.columns()[0].get;
                         rows.sort_by_cached_key(|v| first(v).to_lowercase());
-                        app.status = format!("{} {} loaded", rows.len(), node.title().to_lowercase());
+                        let noun = node.title().to_lowercase();
+                        app.status = if truncated {
+                            format!("{} {noun} loaded; the list stops there, so some are missing", rows.len())
+                        } else {
+                            format!("{} {noun} loaded", rows.len())
+                        };
                         log::info!("{}", app.status);
                         app.errors.remove(&node);
+                        if truncated {
+                            app.truncated.insert(node);
+                        } else {
+                            app.truncated.remove(&node);
+                        }
+                        app.data_changing(node);
                         app.data.insert(node, rows);
                     }
                     Err(e) => {
@@ -409,8 +442,36 @@ impl App {
         );
     }
 
-    /// Replaces or inserts an object in the cached list for `node`.
+    /// Why the list for `node` may not hold every object, if it may not.
+    pub fn incomplete_list(&self, node: Node) -> Option<String> {
+        let noun = node.title().to_lowercase();
+        if self.loading.contains(&node) {
+            Some(format!("The {noun} are still loading."))
+        } else if self.errors.contains_key(&node) {
+            Some(format!("The {noun} did not load. Refresh the list and try again."))
+        } else if self.truncated.contains(&node) {
+            Some(format!("Only the first {} {noun} were loaded.", crate::graph::MAX_ITEMS))
+        } else if !self.data.contains_key(&node) {
+            Some(format!("The {noun} have not been loaded."))
+        } else {
+            None
+        }
+    }
+
+    /// Remembers the selection before the data for `node` changes, while the view still matches it.
+    fn data_changing(&mut self, node: Node) {
+        if self.node == node && self.sel_before_change.is_none() {
+            self.sel_before_change = Some(self.selected().map(|v| v["id"].clone()));
+        }
+    }
+
+    /// Updates an object in the cached list for `node`, or adds it. Lists that are not loaded
+    /// are left alone, so they still load in full when opened.
     pub fn upsert(&mut self, node: Node, obj: Value) {
+        if !self.data.contains_key(&node) {
+            return;
+        }
+        self.data_changing(node);
         let rows = self.data.entry(node).or_default();
         match rows.iter_mut().find(|r| r["id"] == obj["id"]) {
             Some(r) => {
@@ -428,6 +489,7 @@ impl App {
     }
 
     pub fn remove_obj(&mut self, node: Node, id: &str) {
+        self.data_changing(node);
         if let Some(rows) = self.data.get_mut(&node) {
             rows.retain(|r| r["id"] != id);
         }
@@ -437,7 +499,11 @@ impl App {
     }
 
     fn rebuild_view(&mut self) {
-        let prev = self.selected().map(|v| v["id"].clone());
+        let prev = match self.sel_before_change.take() {
+            Some(prev) => prev,
+            None => self.selected().map(|v| v["id"].clone()),
+        };
+        let old_pos = self.sel;
         let rows = self.data.get(&self.node).map(Vec::as_slice).unwrap_or(&[]);
         let cols = self.node.columns();
         let needle = self.filter.trim().to_lowercase();
@@ -457,9 +523,10 @@ impl App {
                     view.reverse();
                 }
             }
+        // When the selected object has gone, select the one now in its place.
         self.sel = prev
             .and_then(|id| view.iter().position(|&i| rows[i]["id"] == id))
-            .or(if view.is_empty() { None } else { Some(0) });
+            .or(if view.is_empty() { None } else { Some(old_pos.unwrap_or(0).min(view.len() - 1)) });
         self.view = view;
         self.view_dirty = false;
     }

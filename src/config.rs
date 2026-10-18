@@ -22,6 +22,12 @@ pub struct Settings {
     pub graph_endpoint: String,
     /// off, error, warn, info, debug or trace.
     pub log_level: String,
+    /// The MariaDB server last exported to. The password is never saved.
+    pub db_host: String,
+    pub db_port: u16,
+    pub db_user: String,
+    pub db_name: String,
+    pub db_tls: bool,
 }
 
 impl Default for Settings {
@@ -34,6 +40,11 @@ impl Default for Settings {
             authority_host: "https://login.microsoftonline.com".to_string(),
             graph_endpoint: "https://graph.microsoft.com".to_string(),
             log_level: "debug".to_string(),
+            db_host: String::new(),
+            db_port: crate::db::DEFAULT_PORT,
+            db_user: String::new(),
+            db_name: String::new(),
+            db_tls: false,
         }
     }
 }
@@ -89,6 +100,21 @@ impl Settings {
         if let Some(v) = get("logging", "level").filter(|v| !v.is_empty()) {
             s.log_level = v;
         }
+        if let Some(v) = get("mariadb", "host") {
+            s.db_host = v;
+        }
+        if let Some(v) = get("mariadb", "port").and_then(|v| v.parse().ok()) {
+            s.db_port = v;
+        }
+        if let Some(v) = get("mariadb", "user") {
+            s.db_user = v;
+        }
+        if let Some(v) = get("mariadb", "database") {
+            s.db_name = v;
+        }
+        if let Some(v) = get("mariadb", "tls") {
+            s.db_tls = matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "1");
+        }
         Ok(s)
     }
 
@@ -112,7 +138,15 @@ impl Settings {
              \n\
              [logging]\n\
              ; Written to output.log in this folder: off, error, warn, info, debug or trace.\n\
-             level = {}\n",
+             level = {}\n\
+             \n\
+             [mariadb]\n\
+             ; The server for Export to MariaDB. The password is asked for each time.\n\
+             host = {}\n\
+             port = {}\n\
+             user = {}\n\
+             database = {}\n\
+             tls = {}\n",
             self.tenant_id.trim(),
             self.client_id.trim(),
             self.remember_sign_in,
@@ -120,6 +154,11 @@ impl Settings {
             self.authority_host,
             self.graph_endpoint,
             self.log_level.trim(),
+            self.db_host.trim(),
+            self.db_port,
+            self.db_user.trim(),
+            self.db_name.trim(),
+            self.db_tls,
         );
         fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
         Ok(path)

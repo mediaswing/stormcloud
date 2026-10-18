@@ -36,6 +36,9 @@ struct Tokens {
     access_token: Option<String>,
     expires_at: Option<Instant>,
     refresh_token: Option<String>,
+    /// Keep the refresh token on disk. Held with the tokens, so a refresh finishing on another
+    /// thread can't write the file back after it was turned off.
+    remember: bool,
 }
 
 pub struct Auth {
@@ -54,10 +57,24 @@ impl Auth {
         } else {
             None
         };
+        let remember = settings.remember_sign_in;
         Auth {
             settings,
             http,
-            tokens: Mutex::new(Tokens { refresh_token, ..Default::default() }),
+            tokens: Mutex::new(Tokens { refresh_token, remember, ..Default::default() }),
+        }
+    }
+
+    /// Turns keeping the sign-in on disk on or off for this session, saving or deleting it now.
+    pub fn set_remember(&self, remember: bool) {
+        let mut t = self.tokens.lock().unwrap();
+        t.remember = remember;
+        match (&t.refresh_token, remember) {
+            (Some(rt), true) => save_refresh_token(rt),
+            (_, false) => {
+                let _ = fs::remove_file(token_path());
+            }
+            (None, true) => {}
         }
     }
 
@@ -166,10 +183,16 @@ impl Auth {
             .send()
             .inspect_err(|e| log::error!("Token refresh request failed: {e}"))?;
         if !resp.status().is_success() {
+            let status = resp.status();
             let text = resp.text().unwrap_or_default();
+            if !sign_in_rejected(&text) {
+                // An outage or throttling: the refresh token may still be good, so keep it.
+                log::warn!("Token refresh failed with {status}; keeping the cached sign-in: {text}");
+                bail!("Could not refresh the sign-in ({status}): {}", describe_error(text));
+            }
             log::warn!("Token refresh rejected; discarding cached sign-in: {text}");
             let mut t = self.tokens.lock().unwrap();
-            *t = Tokens::default();
+            *t = Tokens { remember: t.remember, ..Default::default() };
             let _ = fs::remove_file(token_path());
             bail!(describe_error(text));
         }
@@ -183,7 +206,7 @@ impl Auth {
         t.access_token = Some(tr.access_token);
         t.expires_at = Some(Instant::now() + Duration::from_secs(tr.expires_in));
         if let Some(rt) = tr.refresh_token {
-            if self.settings.remember_sign_in {
+            if t.remember {
                 save_refresh_token(&rt);
             }
             t.refresh_token = Some(rt);
@@ -212,7 +235,8 @@ impl Auth {
 
     pub fn sign_out(&self) {
         log::info!("Signing out; clearing cached tokens");
-        *self.tokens.lock().unwrap() = Tokens::default();
+        let mut t = self.tokens.lock().unwrap();
+        *t = Tokens { remember: t.remember, ..Default::default() };
         let _ = fs::remove_file(token_path());
     }
 }
@@ -230,6 +254,14 @@ fn save_refresh_token(rt: &str) {
             let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
         }
     }
+}
+
+/// True when the token endpoint refused the refresh token itself (expired, revoked, or needing
+/// the user to sign in again), as opposed to failing for a while.
+fn sign_in_rejected(text: &str) -> bool {
+    serde_json::from_str::<ErrorResponse>(text).is_ok_and(|e| {
+        matches!(e.error.as_str(), "invalid_grant" | "interaction_required" | "invalid_client" | "unauthorized_client")
+    })
 }
 
 fn describe_error(text: String) -> String {

@@ -6,6 +6,7 @@ mod app;
 mod auth;
 mod bulk;
 mod config;
+mod db;
 mod dialogs;
 mod graph;
 mod logging;
