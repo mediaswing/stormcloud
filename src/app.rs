@@ -1145,6 +1145,10 @@ impl App {
     }
 
     fn result_table(&mut self, ui: &mut egui::Ui) {
+        // The tree or a menu may have changed node earlier this frame, after the view was last built.
+        if self.view_dirty {
+            self.rebuild_view();
+        }
         let cols = self.node.columns();
         let empty = Vec::new();
         let rows = self.data.get(&self.node).unwrap_or(&empty);
