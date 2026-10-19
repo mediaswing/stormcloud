@@ -4,7 +4,9 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.0] - 2026-10-19
+
+Adds managing connected applications and Exchange Online, and a check for new versions.
 
 ### Added
 
@@ -74,5 +76,6 @@ that talks to Microsoft Graph directly.
 - Installers: a Windows MSI that installs without administrator rights, an Ubuntu/Debian .deb
   (Ubuntu 22.04 and later), and a macOS .pkg for Apple Silicon (macOS 11 and later).
 
+[1.2.0]: https://github.com/mediaswing/stormcloud/releases/tag/v1.2.0
 [1.1.0]: https://github.com/mediaswing/stormcloud/releases/tag/v1.1.0
 [1.0.0]: https://github.com/mediaswing/stormcloud/releases/tag/v1.0.0
