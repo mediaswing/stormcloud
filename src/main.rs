@@ -15,6 +15,7 @@ mod model;
 mod ops;
 mod platform;
 mod sheets;
+mod update;
 
 use std::process::ExitCode;
 

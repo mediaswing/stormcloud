@@ -72,6 +72,9 @@ exchange_endpoint = https://outlook.office365.com
 [logging]
 level = debug
 
+[updates]
+check = true
+
 [mariadb]
 host = db.contoso.local
 port = 3306
@@ -159,6 +162,18 @@ Like a CSV export it saves what's on screen, so filter first to export part of a
 
 The server, port, user name, database and TLS setting are remembered in the `[mariadb]` section
 of `settings.ini`. The password is asked for each time and never saved.
+
+## Updates
+
+At startup Graphical Cloud Management asks GitHub for the latest release, and if it is newer than
+the version running, says so. **Download…** opens the release page, where you choose the installer;
+nothing is downloaded or installed by the app itself. **Skip this version** stops it mentioning that
+version again (it is remembered as `skipped_version` in `settings.ini`), and **Later** asks again
+next time.
+
+**Help › Check for updates…** checks at any time, including for a skipped version. The check sends
+nothing but an ordinary request to `api.github.com`; turn it off by clearing **Check for updates
+when starting** in **File › Settings…**, or with `check = false` in the `[updates]` section.
 
 ## Logging
 

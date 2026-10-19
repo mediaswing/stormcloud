@@ -43,6 +43,9 @@ pub struct Settings {
     pub exchange_scopes: String,
     /// off, error, warn, info, debug or trace.
     pub log_level: String,
+    /// Look for a newer release at startup, and the version the user chose to skip.
+    pub update_check: bool,
+    pub skipped_version: String,
     /// The MariaDB server last exported to. The password is never saved.
     pub db_host: String,
     pub db_port: u16,
@@ -64,6 +67,8 @@ impl Default for Settings {
             exchange_endpoint: "https://outlook.office365.com".to_string(),
             exchange_scopes: "Exchange.Manage".to_string(),
             log_level: "debug".to_string(),
+            update_check: true,
+            skipped_version: String::new(),
             db_host: String::new(),
             db_port: crate::db::DEFAULT_PORT,
             db_user: String::new(),
@@ -133,6 +138,12 @@ impl Settings {
         if let Some(v) = get("logging", "level").filter(|v| !v.is_empty()) {
             s.log_level = v;
         }
+        if let Some(v) = get("updates", "check") {
+            s.update_check = !matches!(v.to_ascii_lowercase().as_str(), "false" | "no" | "0");
+        }
+        if let Some(v) = get("updates", "skipped_version") {
+            s.skipped_version = v;
+        }
         if let Some(v) = get("mariadb", "host") {
             s.db_host = v;
         }
@@ -178,6 +189,11 @@ impl Settings {
              ; Written to output.log in this folder: off, error, warn, info, debug or trace.\n\
              level = {}\n\
              \n\
+             [updates]\n\
+             ; Look for a newer release on GitHub at startup.\n\
+             check = {}\n\
+             skipped_version = {}\n\
+             \n\
              [mariadb]\n\
              ; The server for Export to MariaDB. The password is asked for each time.\n\
              host = {}\n\
@@ -195,6 +211,8 @@ impl Settings {
             self.graph_endpoint,
             self.exchange_endpoint,
             self.log_level.trim(),
+            self.update_check,
+            self.skipped_version.trim(),
             self.db_host.trim(),
             self.db_port,
             self.db_user.trim(),

@@ -171,6 +171,9 @@ impl App {
         } else {
             app.open_settings();
         }
+        if app.settings.update_check {
+            app.check_for_updates(false);
+        }
         app
     }
 
@@ -232,6 +235,21 @@ impl App {
     }
 
     /// Runs `work` with only the auth handle (used for sign-in, which has no token yet).
+    /// Runs `work` on a background thread without Graph, applying `done` on the UI thread.
+    pub fn spawn_plain<T: Send + 'static>(
+        &mut self,
+        work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+        done: impl FnOnce(&mut App, anyhow::Result<T>) + Send + 'static,
+    ) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        thread::spawn(move || {
+            let result = work();
+            let _ = tx.send(Box::new(move |app: &mut App| done(app, result)));
+            ctx.request_repaint();
+        });
+    }
+
     fn spawn_auth<T: Send + 'static>(
         &mut self,
         work: impl FnOnce(&Auth) -> anyhow::Result<T> + Send + 'static,
@@ -827,6 +845,9 @@ impl App {
                 ui.menu_button("Help", |ui| {
                     if ui.add(egui::Button::new("Keyboard shortcuts").shortcut_text("F1")).clicked() {
                         self.push(Dialog::Help);
+                    }
+                    if ui.button("Check for updates…").clicked() {
+                        self.check_for_updates(true);
                     }
                     if ui.button("About Graphical Cloud Management").clicked() {
                         self.push(Dialog::About);

@@ -251,6 +251,7 @@ impl App {
             .field(Field::text("client", "Client ID", &s.client_id).required())
             .field(Field::check("remember", "Remember sign-in on this computer", s.remember_sign_in))
             .field(Field::multiline("scopes", "Scopes", &s.scopes))
+            .field(Field::check("updates", "Check for updates when starting", s.update_check))
             .field(Field::info("Stored in", &crate::config::settings_path().display().to_string()))
             .on_submit(|app, f| {
                 let client = f.text("client");
@@ -266,6 +267,7 @@ impl App {
                     tenant_id: tenant,
                     client_id: client,
                     remember_sign_in: f.checked("remember"),
+                    update_check: f.checked("updates"),
                     scopes: if scopes.is_empty() { crate::config::DEFAULT_SCOPES.into() } else { scopes },
                     ..app.settings.clone()
                 };

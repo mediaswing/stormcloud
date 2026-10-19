@@ -32,6 +32,7 @@ pub enum Dialog {
     ContextMenu,
     Help,
     About,
+    Update(crate::update::Release),
 }
 
 impl Dialog {
@@ -438,6 +439,47 @@ impl App {
                         ok.request_focus();
                     }
                     close |= ok.clicked();
+                });
+                !close
+            }
+            Dialog::Update(release) => {
+                let mut close = escape;
+                modal.show(ctx, |ui| {
+                    ui.set_max_width(560.0);
+                    ui.heading("Update available");
+                    ui.add_space(6.0);
+                    ui.add(
+                        egui::Label::new(format!(
+                            "Graphical Cloud Management {} is available. You have version {}.",
+                            release.version,
+                            env!("CARGO_PKG_VERSION")
+                        ))
+                        .wrap(),
+                    );
+                    if !release.notes.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("What's new").bold());
+                        egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                            ui.add(egui::Label::new(release.notes.as_str()).wrap().selectable(true));
+                        });
+                    }
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let download = ui.button("Download…").on_hover_text("Open the release page in your browser");
+                        if first {
+                            download.request_focus();
+                        }
+                        if download.clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(release.url.as_str()));
+                            close = true;
+                        }
+                        if ui.button("Skip this version").clicked() {
+                            let version = release.version.clone();
+                            self.skip_version(&version);
+                            close = true;
+                        }
+                        close |= ui.button("Later").clicked();
+                    });
                 });
                 !close
             }

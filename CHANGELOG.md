@@ -23,6 +23,9 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
   edit and delete distribution lists and mail-enabled security groups, and manage their members.
   It uses the REST endpoint behind the Exchange Online PowerShell module, needs the delegated
   `Exchange.Manage` permission (approval is offered if it is missing) and an Exchange role.
+- **Update check:** at startup, a dialog says when a newer release is on GitHub, with its notes, a
+  link to download it, and a choice to skip that version. **Help › Check for updates…** checks at
+  any time, and the startup check can be turned off in Settings.
 
 ## [1.1.0] - 2026-10-18
 
