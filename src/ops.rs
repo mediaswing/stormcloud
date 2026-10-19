@@ -30,6 +30,11 @@ pub enum Act {
     Forwarding,
     AutoReplies,
     ConvertMailbox,
+    Onboard,
+    Offboard,
+    Security,
+    RevokeSessions,
+    TemporaryAccessPass,
 }
 
 impl Act {
@@ -54,19 +59,24 @@ impl Act {
             | Act::ImportMembers
             | Act::Forwarding
             | Act::AutoReplies
-            | Act::ConvertMailbox => vec![],
+            | Act::ConvertMailbox
+            | Act::Onboard
+            | Act::Offboard
+            | Act::Security
+            | Act::RevokeSessions
+            | Act::TemporaryAccessPass => vec![],
         }
     }
 
     pub fn needs_selection(self) -> bool {
-        !matches!(self, Act::Refresh | Act::New | Act::ExportList | Act::ExportDatabase | Act::ImportUsers)
+        !matches!(self, Act::Refresh | Act::New | Act::Onboard | Act::ExportList | Act::ExportDatabase | Act::ImportUsers)
     }
 }
 
 /// Actions that apply to the node itself (shown at the top of the Actions pane).
 pub fn node_actions(node: Node) -> Vec<Act> {
     match node {
-        Node::Users => vec![Act::New, Act::ImportUsers, Act::ExportList, Act::ExportDatabase, Act::Refresh],
+        Node::Users => vec![Act::New, Act::Onboard, Act::ImportUsers, Act::ExportList, Act::ExportDatabase, Act::Refresh],
         Node::Groups | Node::Mailboxes | Node::DistributionLists => vec![Act::New, Act::ExportList, Act::ExportDatabase, Act::Refresh],
         Node::Devices | Node::Applications | Node::Licences => vec![Act::ExportList, Act::ExportDatabase, Act::Refresh],
         Node::Root | Node::Exchange => vec![],
@@ -80,7 +90,19 @@ pub fn item_actions(node: Node) -> Vec<Act> {
         Node::Root | Node::Exchange => vec![Open],
         Node::Mailboxes => vec![Properties, Forwarding, AutoReplies, ConvertMailbox, Delete],
         Node::DistributionLists => vec![Properties, AddMember, Delete],
-        Node::Users => vec![Properties, ToggleEnabled, ResetPassword, AssignLicence, AddToGroup, AssignRole, Delete],
+        Node::Users => vec![
+            Properties,
+            Security,
+            ToggleEnabled,
+            ResetPassword,
+            RevokeSessions,
+            TemporaryAccessPass,
+            AssignLicence,
+            AddToGroup,
+            AssignRole,
+            Offboard,
+            Delete,
+        ],
         Node::Groups => vec![Properties, AddMember, ImportMembers, AssignRole, AssignLicence, Delete],
         Node::Devices => vec![Properties, ToggleEnabled, Delete],
         Node::Applications => vec![Properties, ToggleEnabled, AssignToUser, Delete],
@@ -143,6 +165,11 @@ impl App {
                 _ => "Convert to shared mailbox",
             }
             .into(),
+            Act::Onboard => "Onboard user…".into(),
+            Act::Offboard => "Offboard user…".into(),
+            Act::Security => "Authentication & security…".into(),
+            Act::RevokeSessions => "Revoke sessions…".into(),
+            Act::TemporaryAccessPass => "Temporary Access Pass…".into(),
         }
     }
 
@@ -214,6 +241,14 @@ impl App {
             Act::Forwarding => self.edit_mailbox(obj, |_| {}),
             Act::AutoReplies => self.edit_auto_replies(obj, |_| {}),
             Act::ConvertMailbox => self.convert_mailbox(obj),
+            Act::Onboard => self.onboard_user(),
+            Act::Offboard => self.offboard_user(obj),
+            Act::Security => {
+                let sheet = Sheet::new(node, obj).on_tab(crate::sheets::TabKind::Security);
+                self.push(Dialog::Sheet(Box::new(sheet)));
+            }
+            Act::RevokeSessions => self.revoke_sessions(obj, |_| {}),
+            Act::TemporaryAccessPass => self.temporary_access_pass(obj, |_| {}),
         }
     }
 
@@ -331,6 +366,9 @@ impl App {
                 let password = f.raw("password");
                 if password.len() < 8 {
                     return Err("Password must be at least 8 characters.".into());
+                }
+                if !is_usage_location(&f.text("usageLocation")) {
+                    return Err("Usage location must be a two-letter country code, such as GB.".into());
                 }
                 let mut body = json!({
                     "accountEnabled": f.checked("enabled"),
@@ -687,6 +725,11 @@ fn search_devices(g: &Graph, q: &str) -> anyhow::Result<Vec<PickItem>> {
         .collect())
 }
 
+/// Blank, or a two-letter country code such as GB.
+pub fn is_usage_location(s: &str) -> bool {
+    s.is_empty() || s.len() == 2 && s.chars().all(|c| c.is_ascii_alphabetic())
+}
+
 pub fn is_guid(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     parts.len() == 5
@@ -780,6 +823,12 @@ mod tests {
         assert!(!Node::Applications.keep(&sp("Application", "f8cdef31-a31e-4b4a-93e4-5f571e91255a")));
         assert!(!Node::Applications.keep(&sp("ManagedIdentity", "11111111-2222-3333-4444-555555555555")));
         assert!(Node::Users.keep(&json!({})));
+    }
+
+    #[test]
+    fn usage_locations() {
+        assert!(is_usage_location("") && is_usage_location("gb"));
+        assert!(!is_usage_location("GBR") && !is_usage_location("G1"));
     }
 
     #[test]

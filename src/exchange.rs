@@ -163,7 +163,7 @@ fn exo_time(v: &Value) -> String {
 }
 
 /// Reads "YYYY-MM-DD HH:MM" as a UTC time for a cmdlet parameter.
-fn parse_time(text: &str) -> Option<String> {
+pub(crate) fn parse_time(text: &str) -> Option<String> {
     let t = text.trim().replace('T', " ");
     let b = t.as_bytes();
     let digits = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15];

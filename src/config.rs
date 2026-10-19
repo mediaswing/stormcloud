@@ -17,6 +17,15 @@ AppRoleAssignment.ReadWrite.All DelegatedPermissionGrant.ReadWrite.All";
 pub const APP_SCOPES: [&str; 3] =
     ["Application.ReadWrite.All", "AppRoleAssignment.ReadWrite.All", "DelegatedPermissionGrant.ReadWrite.All"];
 
+/// Scopes asked for only when a feature first needs them, rather than at sign-in, so a tenant
+/// that never uses these features never grants them. Once granted they are added to `scopes`.
+///
+/// Reading and managing users' authentication methods (Authentication methods tab, Temporary
+/// Access Pass, requiring MFA re-registration).
+pub const AUTH_METHODS_SCOPE: &str = "UserAuthenticationMethod.ReadWrite.All";
+/// Reading sign-in logs, last sign-in times and MFA registration details.
+pub const AUDIT_LOG_SCOPE: &str = "AuditLog.Read.All";
+
 /// The scopes in `wanted` missing from the space-separated `scopes`, which may name them in full
 /// (`https://graph.microsoft.com/User.Read`) or not, in any case.
 pub fn missing_scopes(scopes: &str, wanted: &[&str]) -> Vec<String> {

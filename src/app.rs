@@ -1,6 +1,6 @@
 //! Main window: menu bar, toolbar, console tree, result pane, Actions pane and status bar.
 
-use crate::auth::{Api, Auth, NeedsConsent};
+use crate::auth::{Api, Auth, NeedsConsent, NeedsScopes};
 use crate::config::Settings;
 use crate::dialogs::{Dialog, DialogEntry};
 use crate::graph::Graph;
@@ -45,6 +45,8 @@ pub struct App {
     approval_gen: u64,
     /// Approving the Exchange Online permission has been offered this session.
     exchange_offered: bool,
+    /// Graph scopes an administrator has been asked to approve this session.
+    scopes_offered: HashSet<String>,
     pub account: String,
     pub tenant_name: String,
     pub domains: Vec<String>,
@@ -135,6 +137,7 @@ impl App {
             signin_gen: 0,
             approval_gen: 0,
             exchange_offered: false,
+            scopes_offered: HashSet::new(),
             account: String::new(),
             tenant_name: String::new(),
             domains: Vec::new(),
@@ -203,6 +206,60 @@ impl App {
         log::error!("{title}: {err}");
         self.status = format!("{title} failed");
         self.push(Dialog::message(title, &err.to_string()));
+    }
+
+    /// Reports a failed operation. When it failed for want of Graph permissions, offers (once a
+    /// session) to have an administrator approve them instead.
+    pub fn fail(&mut self, title: &str, err: anyhow::Error) {
+        if let Some(NeedsScopes(missing)) = err.downcast_ref::<NeedsScopes>() {
+            let missing = missing.clone();
+            if self.offer_scopes(title, missing) {
+                log::warn!("{title}: {err}");
+                self.status = format!("{title} needs more permissions");
+                return;
+            }
+        }
+        self.error(title, format!("{err:#}"));
+    }
+
+    /// Asks whether an administrator wants to approve `missing` scopes for `feature`, unless
+    /// they were offered already this session. Returns whether it asked.
+    pub fn offer_scopes(&mut self, feature: &str, missing: Vec<String>) -> bool {
+        let key = missing.join(" ");
+        if !self.scopes_offered.insert(key) {
+            return false;
+        }
+        let text = format!(
+            "{feature} needs Microsoft Graph permissions this app hasn't been granted: {}.\n\n\
+             A Global Administrator or Privileged Role Administrator can approve them now by signing in \
+             and ticking \"Consent on behalf of your organization\". You stay signed in as you are if \
+             that is cancelled. They can also be added on the app registration's API permissions page \
+             with admin consent.\n\n\
+             Sign in to approve them now?",
+            missing.join(", ")
+        );
+        let label = feature.to_string();
+        self.push(Dialog::confirm("Approve permissions", &text, move |app| app.approve_scopes(Api::Graph, missing, &label)));
+        true
+    }
+
+    /// Saves scopes the sign-in was granted without anyone signing in again (see
+    /// [`Auth::ensure_scopes`]) to the Scopes setting, so they are asked for from now on.
+    pub fn sync_scopes(&mut self) {
+        let Some(g) = &self.graph else { return };
+        let current = g.auth.scopes();
+        let wanted: Vec<&str> = current.split_whitespace().collect();
+        let added = crate::config::missing_scopes(&self.settings.scopes, &wanted);
+        if !added.is_empty() {
+            self.save_scopes(&added);
+        }
+    }
+
+    /// Runs `f` at the start of the next frame, when every dialog is back on the stack, so it can
+    /// change a dialog other than the one being drawn (dialogs are detached while drawn).
+    pub fn defer(&self, f: impl FnOnce(&mut App) + Send + 'static) {
+        let _ = self.tx.send(Box::new(f));
+        self.ctx.request_repaint();
     }
 
     /// Runs `work` on a background thread and applies `done` on the UI thread.
@@ -386,7 +443,7 @@ impl App {
             Ok(_) => log::info!("Added to the saved scopes: {}", added.join(" ")),
             Err(e) => log::error!("Could not save the added scopes: {e}"),
         }
-        self.status = "Permissions for Applications added".into();
+        self.status = "Permissions added".into();
     }
 
     fn offer_app_scopes(&mut self, missing: Vec<String>) {
@@ -404,11 +461,11 @@ impl App {
              you sign in.",
             missing.join(", ")
         );
-        self.push(Dialog::confirm("Permissions for Applications", &text, move |app| app.approve_scopes(Api::Graph, missing)));
+        self.push(Dialog::confirm("Permissions for Applications", &text, move |app| app.approve_scopes(Api::Graph, missing, "Applications")));
     }
 
     /// Offers, once a session, to approve the Exchange Online permission the Exchange node needs.
-    fn offer_exchange_consent(&mut self) {
+    pub(crate) fn offer_exchange_consent(&mut self) {
         if self.exchange_offered {
             return;
         }
@@ -419,16 +476,16 @@ impl App {
                     your organization\", or add it to the app registration's API permissions and grant admin \
                     consent. Changing mailboxes and distribution lists also needs the Exchange Administrator role.\n\n\
                     Sign in to approve it now?";
-        self.push(Dialog::confirm("Permissions for Exchange", text, |app| app.approve_scopes(Api::Exchange, Vec::new())));
+        self.push(Dialog::confirm("Permissions for Exchange", text, |app| app.approve_scopes(Api::Exchange, Vec::new(), "Exchange")));
     }
 
     /// A device code sign-in asking for the scopes on `api` plus `extra`, for an administrator to
     /// approve them. The sign-in so far is kept if it fails or is cancelled.
-    fn approve_scopes(&mut self, api: Api, extra: Vec<String>) {
+    fn approve_scopes(&mut self, api: Api, extra: Vec<String>, feature: &str) {
         self.approval_gen += 1;
         let (attempt, session) = (self.approval_gen, self.signin_gen);
         let current = move |app: &App| attempt == app.approval_gen && session == app.signin_gen;
-        let feature = if api == Api::Exchange { "Exchange" } else { "Applications" };
+        let feature = feature.to_string();
         let ask = extra.clone();
         self.status = "Requesting sign-in code…".into();
         self.spawn_auth(move |a| a.start_device_code(api, &ask), move |app, r| {
@@ -1374,7 +1431,7 @@ fn section(ui: &mut egui::Ui, title: &str) {
 /// Synthetic rows describing the children of a container node, as MMC shows them.
 fn child_rows(node: Node) -> Vec<Value> {
     let describe = |n: Node| match n {
-        Node::Users => "Create, edit, enable/disable and delete user accounts; reset passwords",
+        Node::Users => "Create, onboard, offboard and edit user accounts; reset passwords; manage authentication methods and review sign-ins",
         Node::Groups => "Manage groups, membership, owners, licences and directory role assignments",
         Node::Devices => "View, enable/disable and delete registered devices",
         Node::Applications => "Manage connected applications, who can use them and the permissions granted to them",

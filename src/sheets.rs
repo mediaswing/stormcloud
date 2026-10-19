@@ -6,6 +6,7 @@ use crate::graph::Graph;
 use crate::model::{self, general_fields, s, sku_name, Node};
 use crate::ops::{collection, DEFAULT_ACCESS_ROLE};
 use crate::app::Bold;
+use crate::auth::NeedsScopes;
 use eframe::egui::{self, Align, Key, Layout, Modifiers, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use serde_json::{json, Value};
@@ -28,10 +29,13 @@ pub enum TabKind {
     MailboxAccess,
     AutoReplies,
     ListMembers,
+    Security,
+    AuthMethods,
+    SignIns,
 }
 
 impl TabKind {
-    fn title(self) -> &'static str {
+    pub fn title(self) -> &'static str {
         match self {
             TabKind::General => "General",
             TabKind::MemberOf => "Member of",
@@ -48,6 +52,9 @@ impl TabKind {
             TabKind::MailboxAccess => "Mailbox permissions",
             TabKind::AutoReplies => "Automatic replies",
             TabKind::ListMembers => "Members",
+            TabKind::Security => "Authentication & security",
+            TabKind::AuthMethods => "Authentication methods",
+            TabKind::SignIns => "Sign-ins",
         }
     }
 }
@@ -55,7 +62,7 @@ impl TabKind {
 fn tabs_for(node: Node) -> Vec<TabKind> {
     use TabKind::*;
     match node {
-        Node::Users => vec![General, MemberOf, UserLicences, Roles],
+        Node::Users => vec![General, MemberOf, UserLicences, Roles, Security, AuthMethods, SignIns],
         Node::Groups => vec![General, Members, Owners, Roles, GroupLicences],
         Node::Devices => vec![General, RegisteredOwners, RegisteredUsers, MemberOf],
         Node::Applications => vec![General, AppUsers, Owners, Permissions],
@@ -100,6 +107,8 @@ pub enum TabOp {
     Remove,
     Edit,
     Reload,
+    /// One of a tab's further buttons, by position (see `security::extra_ops`).
+    Extra(usize),
 }
 
 impl Sheet {
@@ -111,6 +120,14 @@ impl Sheet {
         Sheet { node, obj, tabs, active: 0 }
     }
 
+    /// Opens the sheet on the tab of `kind`, if it has one.
+    pub fn on_tab(mut self, kind: TabKind) -> Sheet {
+        if let Some(i) = self.tabs.iter().position(|t| t.kind == kind) {
+            self.active = i;
+        }
+        self
+    }
+
     fn name(&self) -> String {
         self.node.object_name(&self.obj)
     }
@@ -120,6 +137,7 @@ impl Sheet {
         use TabKind::*;
         let editable = matches!(self.node, Node::Users | Node::Groups | Node::Applications | Node::Mailboxes | Node::DistributionLists);
         match (self.node, kind) {
+            (Node::Users, Security | AuthMethods | SignIns) => crate::security::op_labels(kind),
             (_, General) if editable => [None, None, Some("Edit…")],
             (Node::Users, MemberOf) => [Some("Add to group…"), Some("Remove from group"), None],
             (Node::Users, UserLicences) | (Node::Groups, GroupLicences) => [Some("Assign licence…"), Some("Remove licence"), None],
@@ -163,12 +181,18 @@ fn sku_names(g: &Graph) -> anyhow::Result<std::collections::HashMap<String, Stri
         .collect())
 }
 
-/// Fetches the content of a tab (runs on a worker thread). Returns the body and,
-/// for General tabs, the freshly read object.
-fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result<(TabBody, Option<Value>)> {
+/// What loading a tab found: its body, for General tabs the freshly read object, and any
+/// Graph scopes part of it couldn't be read without.
+type Loaded = (TabBody, Option<Value>, Vec<String>);
+
+/// Fetches the content of a tab (runs on a worker thread).
+fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result<Loaded> {
     use TabKind::*;
     if matches!(node, Node::Mailboxes | Node::DistributionLists) {
-        return crate::exchange::load_tab(g, node, kind, obj);
+        return crate::exchange::load_tab(g, node, kind, obj).map(|(body, fresh)| (body, fresh, Vec::new()));
+    }
+    if matches!(kind, Security | AuthMethods | SignIns) {
+        return crate::security::load_tab(g, kind, obj).map(|(body, missing)| (body, None, missing));
     }
     let id = s(obj, "id");
     let coll = collection(node);
@@ -221,7 +245,7 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
             if node == Node::Applications {
                 fields.insert(4, ("Visible to users".into(), model::yes_no(&model::visible_to_users(&fresh))));
             }
-            return Ok((TabBody::Fields(fields), Some(fresh)));
+            return Ok((TabBody::Fields(fields), Some(fresh), Vec::new()));
         }
         (_, MemberOf) => {
             let items = g.list(&format!("/{coll}/{id}/memberOf?$select=id,displayName,mail,description&$top=999"))?;
@@ -300,7 +324,7 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
         (_, Permissions) => load_permissions(g, &id)?,
         _ => TabBody::Fields(Vec::new()),
     };
-    Ok((body, None))
+    Ok((body, None, Vec::new()))
 }
 
 /// The application and delegated permissions granted to a service principal. Each row's data
@@ -369,10 +393,15 @@ impl App {
             move |g| load_tab(g, node, kind, &obj),
             move |app, r| {
                 let mut fresh_obj = None;
+                let mut missing = Vec::new();
+                if let Some(NeedsScopes(m)) = r.as_ref().err().and_then(|e| e.downcast_ref::<NeedsScopes>()) {
+                    missing = m.clone();
+                }
                 if let Some(sheet) = app.sheet_mut(sheet_id)
                     && let Some(tab) = sheet.tabs.iter_mut().find(|t| t.kind == kind) {
                         match r {
-                            Ok((body, fresh)) => {
+                            Ok((body, fresh, partly)) => {
+                                missing = partly;
                                 tab.body = body;
                                 if let Some(f) = fresh {
                                     if let (Some(dst), Some(src)) = (sheet.obj.as_object_mut(), f.as_object()) {
@@ -383,7 +412,7 @@ impl App {
                                     fresh_obj = Some(f);
                                 }
                             }
-                            Err(e) => tab.body = TabBody::Error(e.to_string()),
+                            Err(e) => tab.body = TabBody::Error(format!("{e:#}")),
                         }
                         let len = match &tab.body {
                             TabBody::Table { rows, .. } => rows.len(),
@@ -393,6 +422,10 @@ impl App {
                     }
                 if let Some(f) = fresh_obj {
                     app.upsert(node, f);
+                }
+                app.sync_scopes();
+                if !missing.is_empty() {
+                    app.offer_scopes(kind.title(), missing);
                 }
             },
         );
@@ -446,6 +479,7 @@ impl App {
         }
 
         let labels = sheet.op_labels(kind);
+        let extras = if sheet.node == Node::Users { crate::security::extra_ops(kind) } else { &[] };
         let name = sheet.name();
         modal.show(ctx, |ui| {
             ui.set_width(760.0);
@@ -571,6 +605,11 @@ impl App {
                     && ui.button(l).on_hover_text("F2").clicked() {
                         op = Some(TabOp::Edit);
                     }
+                for (i, l) in extras.iter().enumerate() {
+                    if ui.button(*l).clicked() {
+                        op = Some(TabOp::Extra(i));
+                    }
+                }
                 if ui.button("Refresh").on_hover_text("F5").clicked() {
                     op = Some(TabOp::Reload);
                 }
@@ -605,12 +644,15 @@ impl App {
             return;
         }
         let obj = sheet.obj.clone();
+        if node == Node::Users && matches!(kind, Security | AuthMethods | SignIns) {
+            return self.security_sheet_op(sheet_id, kind, op, obj, row);
+        }
         if matches!(node, Node::Mailboxes | Node::DistributionLists) {
             let has_op = match op {
                 TabOp::Add => labels[0].is_some(),
                 TabOp::Remove => labels[1].is_some(),
                 TabOp::Edit => labels[2].is_some(),
-                TabOp::Reload => false,
+                TabOp::Reload | TabOp::Extra(_) => false,
             };
             if has_op {
                 self.exchange_sheet_op(sheet_id, node, kind, op, obj, row);
@@ -754,6 +796,9 @@ impl App {
             _ => return,
         };
         let form = form.on_submit(move |app, f| {
+            if !crate::ops::is_usage_location(&f.text("usageLocation")) {
+                return Err("Usage location must be a two-letter country code, such as GB.".into());
+            }
             let mut body = json!({});
             for field in &f.fields {
                 if field.key.is_empty() {

@@ -4,6 +4,37 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Adds managing users' authentication and security, and wizards for onboarding and offboarding.
+
+### Added
+
+- **Authentication & security:** three new tabs on a user's properties. A summary of whether
+  they can sign in, with their last sign-ins, MFA registration and troubleshooting findings; their
+  authentication methods (Microsoft Authenticator, phones, passkeys and FIDO2 keys, Windows Hello
+  for Business and more, with phone numbers masked), which can be deleted; and their recent
+  sign-ins with application, result, IP address, location and Conditional Access results.
+- **Revoke sessions**, **Temporary Access Pass** and **Require MFA re-registration** for a user.
+- **Onboard user:** a wizard that creates a user with their manager, licences and groups, which
+  can be copied from another user, and a generated password that must be changed at first sign-in.
+- **Offboard user:** a wizard that blocks sign-in, revokes sessions, removes directory roles
+  (including PIM eligibility), converts the mailbox to shared and sets forwarding, removes groups
+  and licences, and can delete the account. It shows every change first, runs them in an order
+  that keeps the mailbox safe, and skips steps whose prerequisites failed.
+- Both wizards end with a report of every step that can be saved or copied, and only report
+  success when every step succeeded.
+- The permissions `UserAuthenticationMethod.ReadWrite.All` and `AuditLog.Read.All` are asked for
+  only when a feature first needs them.
+
+### Fixed
+
+- The saved sign-in (`token.json`) could be readable by other users of the computer for a moment
+  while it was written on macOS and Linux, and kept the permissions of an older file. It is now
+  created readable only by you.
+- New user and Edit now check that a usage location is a two-letter country code, as the CSV
+  import does, rather than leaving Microsoft Graph to refuse it.
+
 ## [1.2.0] - 2026-10-19
 
 Adds managing connected applications and Exchange Online, and a check for new versions.

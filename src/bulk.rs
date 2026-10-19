@@ -399,7 +399,7 @@ impl App {
 
     /// Asks where to save, then writes the CSV. Returns the path written, or None if the user
     /// cancelled or writing failed (which is reported).
-    fn save_csv(&mut self, title: &str, file_name: &str, headers: &[&str], rows: &[Vec<String>]) -> Option<PathBuf> {
+    pub(crate) fn save_csv(&mut self, title: &str, file_name: &str, headers: &[&str], rows: &[Vec<String>]) -> Option<PathBuf> {
         let mut path = rfd::FileDialog::new()
             .set_title(title)
             .add_filter("CSV file", &["csv"])

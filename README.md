@@ -7,7 +7,7 @@ and talks to Microsoft Graph directly.
 
 | Node | What you can do |
 | --- | --- |
-| **Users** | Create (one at a time or in bulk from CSV), edit, enable/disable, delete, reset password; manage group membership, licences and directory roles |
+| **Users** | Create (one at a time, in bulk from CSV, or with the **onboarding wizard**), edit, enable/disable, delete, reset password; manage group membership, licences and directory roles; **offboard** leavers; see and manage **authentication methods**, review **sign-ins**, revoke sessions and issue **Temporary Access Passes** |
 | **Groups** | Create (security / Microsoft 365, optionally role-assignable), edit, delete; manage members (also in bulk from CSV), owners, licences and **directory role assignments** |
 | **Devices** | View details, owners, users and group membership; enable/disable; delete |
 | **Applications** | View the enterprise applications connected to the tenant; enable/disable sign-in; delete; set whether assignment is required and whether users see them; manage the users and groups assigned, owners, and review or revoke the permissions granted to them |
@@ -28,6 +28,20 @@ and talks to Microsoft Graph directly.
    device code (it opens your browser for you).
 
 The permissions are delegated: what you can actually change is still limited by your own Entra roles.
+
+Two more delegated Graph permissions are only asked for the first time a feature needs them, so a
+tenant that doesn't use those features never grants them:
+
+| Permission | Needed for |
+| --- | --- |
+| `UserAuthenticationMethod.ReadWrite.All` | The Authentication methods tab, Temporary Access Passes and requiring MFA re-registration |
+| `AuditLog.Read.All` | The Sign-ins tab, last sign-in times and MFA registration details |
+
+When one is missing, the app first asks for it without signing in again (which works once an
+administrator has granted it), and otherwise offers once a session to have an administrator
+approve it. Once granted it is added to **Scopes** in `settings.ini`. To see which Conditional
+Access policies applied to a sign-in, also grant `Policy.Read.ConditionalAccess` and add it to
+Scopes; without it Microsoft Graph leaves the policies out.
 
 For the Exchange Online node, also add the *delegated* **Office 365 Exchange Online** permission
 `Exchange.Manage` (under **APIs my organization uses**) and grant admin consent; see
@@ -107,6 +121,86 @@ without notice. Every request is logged with the cmdlet's name, so `output.log` 
 - A user's mailbox can't be deleted here: delete the user under Users, or remove their licence.
 - For a national cloud, set `exchange_endpoint` in the `[cloud]` section of `settings.ini`, and
   `exchange_scopes` in `[auth]` if the permission has another name there.
+
+## Authentication and security
+
+A user's properties have three more tabs. **Authentication & security** sums up whether they
+can sign in: whether the account is enabled or synced, their last interactive, non-interactive
+and successful sign-ins, when the password last changed, whether they are registered for MFA,
+their default method, and their methods. Below that, **Troubleshooting** lists what stands
+out, such as a disabled account, no MFA method, or the last failed sign-in with what its error
+code means (wrong password, smart lockout, blocked by Conditional Access, and so on).
+
+**Authentication methods** lists the Microsoft Authenticator registrations, phone numbers,
+passkeys and FIDO2 security keys, Windows Hello for Business, OATH codes, the password reset email
+and any Temporary Access Pass. Phone numbers and email addresses are masked (`+44 •••123`), as
+the last digits are enough to check with the user. Methods other than the password can be
+deleted, with a confirmation that says what stops working.
+
+**Sign-ins** lists the latest 50 interactive sign-ins with the application, result, IP address,
+location and Conditional Access result. **Details…** shows everything about one, including the
+failure reason and the Conditional Access policies that applied.
+
+The Actions pane also has these for the selected user:
+
+- **Revoke sessions…** invalidates the refresh tokens and browser sessions issued to the user,
+  so apps have to sign in again. It can take a few minutes, and access tokens already issued
+  stay valid until they expire (usually within an hour), so it doesn't end access straight
+  away; disable the account or reset the password to stop them signing in again.
+- **Temporary Access Pass…** creates a time-limited pass (10 minutes to 30 days, one use or
+  several, as the tenant's policy allows), for example to set up a new phone. It replaces any
+  pass the user has, and is shown only once.
+- **Require MFA re-registration…** (on the Authentication & security tab) deletes the user's
+  MFA methods: Microsoft Authenticator, phones, OATH codes and passkeys. This is how Microsoft
+  documents requiring re-registration with Graph. The next time MFA is required they have to
+  register again. The password, Windows Hello for Business, platform credentials, the password
+  reset email and any Temporary Access Pass are kept. Each deletion's result is shown; a phone
+  number that is the default method can be refused.
+
+What these need:
+
+| Feature | Entra role | Licence |
+| --- | --- | --- |
+| Authentication methods, Temporary Access Pass | Authentication Administrator, or Privileged Authentication Administrator for administrators | — |
+| Sign-ins, last sign-in, MFA registration details | Reports Reader, Security Reader, Security Operator, Security Administrator or Global Reader | Microsoft Entra ID P1 or P2 |
+| Conditional Access policies on a sign-in | Global Reader, Security Reader, Security Administrator or Conditional Access Administrator | Microsoft Entra ID P1 or P2 |
+| Revoke sessions | User Administrator, Helpdesk Administrator (for non-administrators) or Privileged Authentication Administrator | — |
+
+When the role or licence is missing, the tab or action says which is needed. Phone numbers,
+sign-in details and Temporary Access Passes are never written to `output.log`.
+
+## Onboarding and offboarding
+
+**Onboard user…** (on Users) is a wizard for a new starter: name, user name and domain, job
+title, department, usage location and manager; then licences, showing how many of each are free;
+then groups, chosen one by one or copied from a user in a similar role. Copying only ticks groups
+whose membership is set here: dynamic groups, groups synced from Active Directory and
+distribution lists are listed but can't be ticked, and role-assignable groups are listed
+unticked, as their members get directory roles. A random password is generated, and changing it
+at first sign-in is required unless you untick it. Before anything is created the review page
+lists each step and checks the user name is free.
+
+**Offboard user…** (on a selected user) reads the user's roles, groups, licences and mailbox, and
+lets you choose what to do:
+
+1. Block sign-in, and revoke sign-in sessions
+2. Remove directory roles, active and eligible (PIM)
+3. Convert the mailbox to a shared mailbox, and forward email to someone
+4. Remove group memberships (distribution lists and mail-enabled security groups through Exchange Online)
+5. Remove licences assigned directly (inherited ones go with the group)
+6. Delete the account
+
+They always run in that order. A preview lists every change, which must be ticked as checked
+before it runs. Removing a licence, directly or by leaving a group that assigns one, only runs if
+the mailbox steps succeeded, as Exchange Online deletes an unlicensed mailbox after 30 days.
+Deleting the account only runs if every other step succeeded, and can't be chosen together with
+keeping or forwarding the mailbox, because a shared mailbox is deleted with its account. You
+can't offboard the account you are signed in with.
+
+Both wizards finish with a report of each step: done, failed (with Microsoft's error) or not run
+because a step it needed failed. The workflow is only reported as completed when every step
+succeeded. **Save report…** writes it to a CSV file and **Copy report** to the clipboard; the
+onboarding report doesn't include the initial password, which is shown separately to copy.
 
 ## CSV import and export
 

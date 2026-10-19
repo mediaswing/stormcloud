@@ -12,10 +12,14 @@ mod exchange;
 mod graph;
 mod logging;
 mod model;
+mod offboarding;
+mod onboarding;
 mod ops;
 mod platform;
+mod security;
 mod sheets;
 mod update;
+mod workflow;
 
 use std::process::ExitCode;
 

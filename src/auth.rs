@@ -37,6 +37,25 @@ impl std::fmt::Display for NeedsConsent {
 
 impl std::error::Error for NeedsConsent {}
 
+/// The sign-in hasn't been granted these Microsoft Graph scopes, and asking for them without
+/// signing in again was refused, so an administrator has to approve them.
+#[derive(Debug)]
+pub struct NeedsScopes(pub Vec<String>);
+
+impl std::fmt::Display for NeedsScopes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "This needs Microsoft Graph permissions that haven't been granted to this app: {}. An administrator \
+             can approve them by signing in when asked, or by adding them to the app registration's API \
+             permissions and granting admin consent.",
+            self.0.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for NeedsScopes {}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct DeviceCode {
     pub device_code: String,
@@ -58,6 +77,9 @@ struct TokenResponse {
     access_token: String,
     expires_in: u64,
     refresh_token: Option<String>,
+    /// The scopes the access token was granted, space-separated.
+    #[serde(default)]
+    scope: String,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +92,8 @@ struct ErrorResponse {
 struct Tokens {
     /// Access tokens and when they expire, for each API.
     access: HashMap<Api, (String, Instant)>,
+    /// The scopes the latest access token for each API was granted.
+    granted: HashMap<Api, String>,
     refresh_token: Option<String>,
     /// Keep the refresh token on disk. Held with the tokens, so a refresh finishing on another
     /// thread can't write the file back after it was turned off.
@@ -209,7 +233,10 @@ impl Auth {
                 let tr = resp.json()?;
                 // Whoever signed in may not be who was signed in before, so access tokens for
                 // other APIs, from the old sign-in, must not be used with the new one.
-                self.tokens.lock().unwrap().access.clear();
+                let mut t = self.tokens.lock().unwrap();
+                t.access.clear();
+                t.granted.clear();
+                drop(t);
                 self.store(dc.api, tr);
                 log::info!("Device code sign-in completed");
                 return Ok(());
@@ -309,8 +336,29 @@ impl Auth {
         Ok(true)
     }
 
+    /// The scopes asked for on Microsoft Graph, including any added since signing in.
+    pub fn scopes(&self) -> String {
+        self.scopes.lock().unwrap().clone()
+    }
+
+    /// Makes sure the Graph sign-in has `wanted` scopes, asking for any it lacks without signing
+    /// in again. Fails with [`NeedsScopes`] when they need an administrator's approval.
+    pub fn ensure_scopes(&self, wanted: &[&str]) -> Result<()> {
+        self.token_for(Api::Graph)?;
+        let granted = self.tokens.lock().unwrap().granted.get(&Api::Graph).cloned().unwrap_or_default();
+        // A token response without `scope` says nothing either way, so go by what was asked for.
+        let have = if granted.trim().is_empty() { self.scopes() } else { granted };
+        let missing = crate::config::missing_scopes(&have, wanted);
+        if missing.is_empty() || self.try_add_scopes(&missing)? {
+            Ok(())
+        } else {
+            Err(NeedsScopes(missing).into())
+        }
+    }
+
     fn store(&self, api: Api, tr: TokenResponse) {
         let mut t = self.tokens.lock().unwrap();
+        t.granted.insert(api, tr.scope);
         t.access.insert(api, (tr.access_token, Instant::now() + Duration::from_secs(tr.expires_in)));
         if let Some(rt) = tr.refresh_token {
             if t.remember {
@@ -356,13 +404,27 @@ fn save_refresh_token(rt: &str) {
         let _ = fs::create_dir_all(dir);
     }
     let body = serde_json::json!({ "refresh_token": rt }).to_string();
-    if fs::write(&path, body).is_ok() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    if let Err(e) = write_private(&path, body.as_bytes()) {
+        log::error!("Could not save the sign-in to {}: {e}", path.display());
+    }
+}
+
+/// Writes a file only its owner can read. On Unix the file is created owner-only, and an existing
+/// file is made owner-only before anything is written to it, so the token is never readable by
+/// other users, even briefly.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        if path.exists() {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         }
     }
+    options.open(path)?.write_all(bytes)
 }
 
 /// True when the token endpoint refused the refresh token itself (expired, revoked, or needing
@@ -382,5 +444,35 @@ fn describe_error(text: String) -> String {
             format!("{}: {}", e.error, first)
         }
         Err(_) => text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_granted_scopes() {
+        let tr: TokenResponse =
+            serde_json::from_str(r#"{"access_token":"a","expires_in":3600,"scope":"User.Read AuditLog.Read.All"}"#).unwrap();
+        assert_eq!(tr.scope, "User.Read AuditLog.Read.All");
+        let tr: TokenResponse = serde_json::from_str(r#"{"access_token":"a","expires_in":3600}"#).unwrap();
+        assert!(tr.scope.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("stormcloud-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token.json");
+        // An older version left the file readable by everyone.
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, b"new").unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

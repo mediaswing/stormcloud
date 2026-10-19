@@ -153,6 +153,15 @@ impl Graph {
     pub fn delete(&self, path: &str) -> Result<()> {
         self.send(Method::DELETE, path, None, false).map(|_| ())
     }
+
+    pub fn put(&self, path: &str, body: &Value) -> Result<()> {
+        self.send(Method::PUT, path, Some(body), false).map(|_| ())
+    }
+
+    /// The full URL of an object in `collection`, for an `@odata.id` reference.
+    pub fn object_url(&self, collection: &str, id: &str) -> String {
+        format!("{}/{collection}/{id}", self.base)
+    }
 }
 
 fn graph_error(api: Api, status: StatusCode, text: &str) -> String {
@@ -172,7 +181,9 @@ pub fn redact(v: &Value) -> Value {
             map.iter()
                 .map(|(k, v)| {
                     let key = k.to_ascii_lowercase();
-                    let masked = (key.contains("password") && !v.is_object()) || key.contains("secret");
+                    let masked = (key.contains("password") && !v.is_object())
+                        || key.contains("secret")
+                        || key == "temporaryaccesspass";
                     (k.clone(), if masked { Value::String("***".into()) } else { redact(v) })
                 })
                 .collect(),
@@ -210,9 +221,10 @@ mod tests {
             "displayName": "Ann",
             "passwordProfile": { "password": "hunter2", "forceChangePasswordNextSignIn": true },
             "passwordCredential": { "displayName": "ci", "secretText": "abc" },
+            "tap": { "temporaryAccessPass": "+drkzqAD", "lifetimeInMinutes": 60 },
         });
         let out = redact(&body).to_string();
-        assert!(!out.contains("hunter2") && !out.contains("abc"));
+        assert!(!out.contains("hunter2") && !out.contains("abc") && !out.contains("drkzqAD"));
         assert!(out.contains("Ann") && out.contains("forceChangePasswordNextSignIn"));
     }
 

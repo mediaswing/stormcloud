@@ -28,6 +28,8 @@ pub enum Dialog {
     Picker(Picker),
     Sheet(Box<Sheet>),
     Bulk(Box<Bulk>),
+    Onboard(Box<crate::onboarding::Onboarding>),
+    Offboard(Box<crate::offboarding::Offboarding>),
     /// A device code sign-in; `approval` when it is only to approve more permissions.
     DeviceCode { message: String, uri: String, code: String, approval: bool, cancelled: Arc<AtomicBool> },
     ContextMenu,
@@ -333,6 +335,8 @@ impl App {
             Dialog::Picker(p) => self.show_picker(ctx, modal, id, p, first, top, escape),
             Dialog::Sheet(sheet) => self.show_sheet(ctx, modal, id, sheet, first, top, escape),
             Dialog::Bulk(bulk) => self.show_bulk(ctx, modal, id, bulk, first, escape),
+            Dialog::Onboard(w) => self.show_onboarding(ctx, modal, id, w, escape),
+            Dialog::Offboard(w) => self.show_offboarding(ctx, modal, id, w, escape),
             Dialog::DeviceCode { message, uri, code, approval, cancelled } => {
                 let approval = *approval;
                 let mut close = escape;
