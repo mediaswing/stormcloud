@@ -336,7 +336,7 @@ impl App {
                 let mut close = escape;
                 modal.show(ctx, |ui| {
                     ui.set_max_width(520.0);
-                    ui.heading(if approval { "Approve permissions for Applications" } else { "Sign in to Microsoft Entra ID" });
+                    ui.heading(if approval { "Approve permissions" } else { "Sign in to Microsoft Entra ID" });
                     ui.add_space(6.0);
                     ui.add(egui::Label::new(message.as_str()).wrap());
                     ui.add_space(8.0);
@@ -410,7 +410,7 @@ impl App {
                         ("F10".into(), "Move to the menu bar"),
                         ("F5".into(), "Refresh"),
                         (format!("{cmd}F"), "Filter the results list"),
-                        (format!("{cmd}N"), "New user / group"),
+                        (format!("{cmd}N"), "New user, group, shared mailbox or distribution list"),
                         ("Delete".into(), "Delete the selected item"),
                         (format!("{cmd}E"), "Enable or disable the selected item"),
                         (format!("{cmd}P"), "Reset a user's password"),

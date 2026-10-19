@@ -17,6 +17,12 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
   `DelegatedPermissionGrant.ReadWrite.All`. After signing in, they are added to a saved Scopes
   setting without them once granted; if they haven't been, you are asked once whether an
   administrator wants to approve them. Sign-in is never refused because of them.
+- **Exchange Online:** a new node with **Mailboxes** and **Distribution lists**. Create shared
+  mailboxes, convert between user and shared mailboxes, set forwarding and automatic replies,
+  manage Full Access, Send As and Send on behalf, and hide mailboxes from address lists. Create,
+  edit and delete distribution lists and mail-enabled security groups, and manage their members.
+  It uses the REST endpoint behind the Exchange Online PowerShell module, needs the delegated
+  `Exchange.Manage` permission (approval is offered if it is missing) and an Exchange role.
 
 ## [1.1.0] - 2026-10-18
 

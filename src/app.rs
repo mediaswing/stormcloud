@@ -1,10 +1,10 @@
 //! Main window: menu bar, toolbar, console tree, result pane, Actions pane and status bar.
 
-use crate::auth::Auth;
+use crate::auth::{Api, Auth, NeedsConsent};
 use crate::config::Settings;
 use crate::dialogs::{Dialog, DialogEntry};
 use crate::graph::Graph;
-use crate::model::{Node, TREE};
+use crate::model::{Node, Source, TREE};
 use crate::ops::{item_actions, node_actions, Act};
 use eframe::egui::{
     self, Align, Event, EventFilter, Key, KeyboardShortcut, Layout, Modifiers, RichText, Sense,
@@ -43,6 +43,8 @@ pub struct App {
     pub signin_gen: u64,
     /// Bumped to drop the result of an approval of more permissions that was cancelled.
     approval_gen: u64,
+    /// Approving the Exchange Online permission has been offered this session.
+    exchange_offered: bool,
     pub account: String,
     pub tenant_name: String,
     pub domains: Vec<String>,
@@ -132,6 +134,7 @@ impl App {
             signed_in: false,
             signin_gen: 0,
             approval_gen: 0,
+            exchange_offered: false,
             account: String::new(),
             tenant_name: String::new(),
             domains: Vec::new(),
@@ -162,6 +165,7 @@ impl App {
             quit: false,
         };
         app.data.insert(Node::Root, child_rows(Node::Root));
+        app.data.insert(Node::Exchange, child_rows(Node::Exchange));
         if app.settings.is_complete() {
             app.connect();
         } else {
@@ -251,7 +255,7 @@ impl App {
             .build()
             .expect("HTTP client");
         let auth = Arc::new(Auth::new(self.settings.clone(), http.clone()));
-        self.graph = Some(Arc::new(Graph::new(auth, http, &self.settings.graph_endpoint)));
+        self.graph = Some(Arc::new(Graph::new(auth, http, &self.settings.graph_endpoint, &self.settings.exchange_endpoint)));
         self.signed_in = false;
         self.clear_lists();
         self.sign_in();
@@ -290,7 +294,7 @@ impl App {
 
     fn device_code(&mut self, attempt: u64) {
         self.status = "Requesting sign-in code…".into();
-        self.spawn_auth(|a| a.start_device_code(&[]), move |app, r| {
+        self.spawn_auth(|a| a.start_device_code(Api::Graph, &[]), move |app, r| {
             if attempt != app.signin_gen {
                 return;
             }
@@ -381,18 +385,34 @@ impl App {
              you sign in.",
             missing.join(", ")
         );
-        self.push(Dialog::confirm("Permissions for Applications", &text, move |app| app.approve_scopes(missing)));
+        self.push(Dialog::confirm("Permissions for Applications", &text, move |app| app.approve_scopes(Api::Graph, missing)));
     }
 
-    /// A device code sign-in asking for `extra` scopes as well, for an administrator to approve them.
-    /// The sign-in so far is kept if it fails or is cancelled.
-    fn approve_scopes(&mut self, extra: Vec<String>) {
+    /// Offers, once a session, to approve the Exchange Online permission the Exchange node needs.
+    fn offer_exchange_consent(&mut self) {
+        if self.exchange_offered {
+            return;
+        }
+        self.exchange_offered = true;
+        let text = "Managing Exchange needs the Exchange.Manage permission on Office 365 Exchange Online, which \
+                    this app hasn't been granted.\n\n\
+                    A Global Administrator can approve it now by signing in and ticking \"Consent on behalf of \
+                    your organization\", or add it to the app registration's API permissions and grant admin \
+                    consent. Changing mailboxes and distribution lists also needs the Exchange Administrator role.\n\n\
+                    Sign in to approve it now?";
+        self.push(Dialog::confirm("Permissions for Exchange", text, |app| app.approve_scopes(Api::Exchange, Vec::new())));
+    }
+
+    /// A device code sign-in asking for the scopes on `api` plus `extra`, for an administrator to
+    /// approve them. The sign-in so far is kept if it fails or is cancelled.
+    fn approve_scopes(&mut self, api: Api, extra: Vec<String>) {
         self.approval_gen += 1;
         let (attempt, session) = (self.approval_gen, self.signin_gen);
         let current = move |app: &App| attempt == app.approval_gen && session == app.signin_gen;
+        let feature = if api == Api::Exchange { "Exchange" } else { "Applications" };
         let ask = extra.clone();
         self.status = "Requesting sign-in code…".into();
-        self.spawn_auth(move |a| a.start_device_code(&ask), move |app, r| {
+        self.spawn_auth(move |a| a.start_device_code(api, &ask), move |app, r| {
             if !current(app) {
                 return;
             }
@@ -416,10 +436,12 @@ impl App {
                     }
                     match r {
                         Ok(()) => {
-                            if let Some(g) = &app.graph {
-                                g.auth.add_scopes(&extra);
+                            if !extra.is_empty() {
+                                if let Some(g) = &app.graph {
+                                    g.auth.add_scopes(&extra);
+                                }
+                                app.save_scopes(&extra);
                             }
-                            app.save_scopes(&extra);
                             // An administrator other than the person signed in may have approved them.
                             app.spawn("Loading profile…", |g| g.get("/me?$select=displayName,userPrincipalName"), |app, r| {
                                 match r {
@@ -430,7 +452,7 @@ impl App {
                         }
                         Err(e) => app.error(
                             "Approve permissions",
-                            format!("The permissions for Applications were not added, and you are still signed in as before.\n\n{e}"),
+                            format!("The permissions for {feature} were not added, and you are still signed in as before.\n\n{e}"),
                         ),
                     }
                 },
@@ -440,7 +462,7 @@ impl App {
 
     pub fn cancel_approval(&mut self) {
         self.approval_gen += 1;
-        self.status = "Permissions for Applications not added".into();
+        self.status = "Permissions not added".into();
     }
 
     fn signed_in_as(&mut self, me: Value) {
@@ -509,7 +531,7 @@ impl App {
 
     /// Reloads `node` in the background (if it has a Graph endpoint).
     pub fn load(&mut self, node: Node) {
-        let Some(path) = node.endpoint() else { return };
+        let Some(source) = node.endpoint() else { return };
         if !self.signed_in || self.loading.contains(&node) {
             return;
         }
@@ -517,7 +539,10 @@ impl App {
         let session = self.signin_gen;
         self.spawn(
             format!("Loading {}…", node.title().to_lowercase()),
-            move |g| g.list_capped(path),
+            move |g| match source {
+                Source::Graph(path) => g.list_capped(path),
+                Source::Exchange => crate::exchange::list(g, node),
+            },
             move |app, r| {
                 if session != app.signin_gen {
                     log::debug!("Dropping {} loaded before signing out", node.title());
@@ -546,6 +571,9 @@ impl App {
                         app.data.insert(node, rows);
                     }
                     Err(e) => {
+                        if e.downcast_ref::<NeedsConsent>().is_some() {
+                            app.offer_exchange_consent();
+                        }
                         app.status = format!("Could not load {}", node.title().to_lowercase());
                         log::error!("Loading {} failed: {e}", node.title());
                         app.errors.insert(node, e.to_string());
@@ -1323,6 +1351,9 @@ fn child_rows(node: Node) -> Vec<Value> {
         Node::Groups => "Manage groups, membership, owners, licences and directory role assignments",
         Node::Devices => "View, enable/disable and delete registered devices",
         Node::Applications => "Manage connected applications, who can use them and the permissions granted to them",
+        Node::Exchange => "Manage Exchange Online mailboxes and distribution lists",
+        Node::Mailboxes => "Create shared mailboxes; set mailbox permissions, forwarding and automatic replies",
+        Node::DistributionLists => "Create and delete distribution lists and manage their members",
         Node::Licences => "View subscriptions and assign or remove licences",
         _ => "",
     };

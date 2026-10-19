@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn every_list_has_distinct_column_names() {
-        for node in [Node::Users, Node::Groups, Node::Devices, Node::Applications, Node::Licences] {
+        for node in [Node::Users, Node::Groups, Node::Devices, Node::Applications, Node::Mailboxes, Node::DistributionLists, Node::Licences] {
             let mut names: Vec<String> = node.columns().iter().map(|c| column_name(c.title)).collect();
             names.extend(["object_id".into(), "sku_id".into(), "exported_at".into()]);
             let count = names.len();

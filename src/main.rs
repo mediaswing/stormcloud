@@ -8,6 +8,7 @@ mod bulk;
 mod config;
 mod db;
 mod dialogs;
+mod exchange;
 mod graph;
 mod logging;
 mod model;

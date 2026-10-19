@@ -1,4 +1,4 @@
-//! Tabbed property sheets for users, groups, devices, applications and licences.
+//! Tabbed property sheets for users, groups, devices, applications, Exchange recipients and licences.
 
 use crate::app::App;
 use crate::dialogs::{Dialog, Field, Form};
@@ -25,6 +25,9 @@ pub enum TabKind {
     LicensedUsers,
     AppUsers,
     Permissions,
+    MailboxAccess,
+    AutoReplies,
+    ListMembers,
 }
 
 impl TabKind {
@@ -42,6 +45,9 @@ impl TabKind {
             TabKind::LicensedUsers => "Licensed users",
             TabKind::AppUsers => "Users and groups",
             TabKind::Permissions => "Permissions",
+            TabKind::MailboxAccess => "Mailbox permissions",
+            TabKind::AutoReplies => "Automatic replies",
+            TabKind::ListMembers => "Members",
         }
     }
 }
@@ -54,7 +60,9 @@ fn tabs_for(node: Node) -> Vec<TabKind> {
         Node::Devices => vec![General, RegisteredOwners, RegisteredUsers, MemberOf],
         Node::Applications => vec![General, AppUsers, Owners, Permissions],
         Node::Licences => vec![General, ServicePlans, LicensedUsers],
-        Node::Root => vec![General],
+        Node::Mailboxes => vec![General, MailboxAccess, AutoReplies],
+        Node::DistributionLists => vec![General, ListMembers],
+        Node::Root | Node::Exchange => vec![General],
     }
 }
 
@@ -87,7 +95,7 @@ pub struct Sheet {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum TabOp {
+pub enum TabOp {
     Add,
     Remove,
     Edit,
@@ -110,7 +118,7 @@ impl Sheet {
     /// Labels for the add / remove / edit operations available on a tab.
     fn op_labels(&self, kind: TabKind) -> [Option<&'static str>; 3] {
         use TabKind::*;
-        let editable = matches!(self.node, Node::Users | Node::Groups | Node::Applications);
+        let editable = matches!(self.node, Node::Users | Node::Groups | Node::Applications | Node::Mailboxes | Node::DistributionLists);
         match (self.node, kind) {
             (_, General) if editable => [None, None, Some("Edit…")],
             (Node::Users, MemberOf) => [Some("Add to group…"), Some("Remove from group"), None],
@@ -120,13 +128,16 @@ impl Sheet {
             (Node::Groups | Node::Applications, Owners) => [Some("Add owner…"), Some("Remove owner"), None],
             (_, AppUsers) => [Some("Assign user or group…"), Some("Remove assignment"), None],
             (_, Permissions) => [None, Some("Revoke permission"), None],
+            (_, MailboxAccess) => [Some("Add permission…"), Some("Remove permission"), None],
+            (_, AutoReplies) => [None, None, Some("Edit…")],
+            (_, ListMembers) => [Some("Add member…"), Some("Remove member"), None],
             (_, LicensedUsers) => [Some("Assign to user…"), Some("Remove from user"), None],
             _ => [None, None, None],
         }
     }
 }
 
-fn table(headers: Vec<&'static str>, items: Vec<Value>, cells: impl Fn(&Value) -> Vec<String>) -> TabBody {
+pub fn table(headers: Vec<&'static str>, items: Vec<Value>, cells: impl Fn(&Value) -> Vec<String>) -> TabBody {
     let rows = items.into_iter().map(|v| SheetRow { cells: cells(&v), data: v }).collect();
     TabBody::Table { headers, rows }
 }
@@ -156,6 +167,9 @@ fn sku_names(g: &Graph) -> anyhow::Result<std::collections::HashMap<String, Stri
 /// for General tabs, the freshly read object.
 fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result<(TabBody, Option<Value>)> {
     use TabKind::*;
+    if matches!(node, Node::Mailboxes | Node::DistributionLists) {
+        return crate::exchange::load_tab(g, node, kind, obj);
+    }
     let id = s(obj, "id");
     let coll = collection(node);
     let principal_cols = |v: &Value| vec![s(v, "displayName"), odata_kind(v), {
@@ -179,7 +193,7 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
                 ("In warning".into(), obj["prepaidUnits"]["warning"].to_string()),
             ])
         }
-        (Node::Root, _) => TabBody::Fields(vec![("Name".into(), s(obj, "name"))]),
+        (Node::Root | Node::Exchange, _) => TabBody::Fields(vec![("Name".into(), s(obj, "name"))]),
         (_, General) => {
             let (select, keys): (&str, &[(&str, &str)]) = match node {
                 Node::Users => (
@@ -581,6 +595,18 @@ impl App {
             return;
         }
         let obj = sheet.obj.clone();
+        if matches!(node, Node::Mailboxes | Node::DistributionLists) {
+            let has_op = match op {
+                TabOp::Add => labels[0].is_some(),
+                TabOp::Remove => labels[1].is_some(),
+                TabOp::Edit => labels[2].is_some(),
+                TabOp::Reload => false,
+            };
+            if has_op {
+                self.exchange_sheet_op(sheet_id, node, kind, op, obj, row);
+            }
+            return;
+        }
         let id = s(&obj, "id");
         let name = node.object_name(&obj);
         let reload = move |app: &mut App| app.reload_tab(sheet_id, kind);

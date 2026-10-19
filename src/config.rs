@@ -38,6 +38,9 @@ pub struct Settings {
     pub app_scopes_offered: bool,
     pub authority_host: String,
     pub graph_endpoint: String,
+    /// Exchange Online, for the Exchange node, and the delegated scopes asked for on it.
+    pub exchange_endpoint: String,
+    pub exchange_scopes: String,
     /// off, error, warn, info, debug or trace.
     pub log_level: String,
     /// The MariaDB server last exported to. The password is never saved.
@@ -58,6 +61,8 @@ impl Default for Settings {
             app_scopes_offered: false,
             authority_host: "https://login.microsoftonline.com".to_string(),
             graph_endpoint: "https://graph.microsoft.com".to_string(),
+            exchange_endpoint: "https://outlook.office365.com".to_string(),
+            exchange_scopes: "Exchange.Manage".to_string(),
             log_level: "debug".to_string(),
             db_host: String::new(),
             db_port: crate::db::DEFAULT_PORT,
@@ -119,6 +124,12 @@ impl Settings {
         if let Some(v) = get("cloud", "graph_endpoint").filter(|v| !v.is_empty()) {
             s.graph_endpoint = v.trim_end_matches('/').to_string();
         }
+        if let Some(v) = get("cloud", "exchange_endpoint").filter(|v| !v.is_empty()) {
+            s.exchange_endpoint = v.trim_end_matches('/').to_string();
+        }
+        if let Some(v) = get("auth", "exchange_scopes").filter(|v| !v.is_empty()) {
+            s.exchange_scopes = v;
+        }
         if let Some(v) = get("logging", "level").filter(|v| !v.is_empty()) {
             s.log_level = v;
         }
@@ -155,10 +166,13 @@ impl Settings {
              scopes = {}\n\
              ; Set once you have been asked to approve the permissions for Applications.\n\
              app_scopes_offered = {}\n\
+             ; Delegated Office 365 Exchange Online permissions, for the Exchange node.\n\
+             exchange_scopes = {}\n\
              \n\
              [cloud]\n\
              authority_host = {}\n\
              graph_endpoint = {}\n\
+             exchange_endpoint = {}\n\
              \n\
              [logging]\n\
              ; Written to output.log in this folder: off, error, warn, info, debug or trace.\n\
@@ -176,8 +190,10 @@ impl Settings {
             self.remember_sign_in,
             self.scopes.trim(),
             self.app_scopes_offered,
+            self.exchange_scopes.trim(),
             self.authority_host,
             self.graph_endpoint,
+            self.exchange_endpoint,
             self.log_level.trim(),
             self.db_host.trim(),
             self.db_port,

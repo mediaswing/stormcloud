@@ -1,11 +1,11 @@
 //! Minimal blocking Microsoft Graph client.
 
-use crate::auth::Auth;
+use crate::auth::{Api, Auth};
 use anyhow::{bail, Result};
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::{Method, StatusCode};
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,11 +16,24 @@ pub struct Graph {
     pub auth: Arc<Auth>,
     http: Client,
     base: String,
+    exchange: String,
+    /// The tenant's ID and initial domain, which Exchange Online requests are addressed with.
+    pub(crate) exchange_tenant: OnceLock<(String, String)>,
 }
 
 impl Graph {
-    pub fn new(auth: Arc<Auth>, http: Client, endpoint: &str) -> Graph {
-        Graph { auth, http, base: format!("{}/v1.0", endpoint.trim_end_matches('/')) }
+    pub fn new(auth: Arc<Auth>, http: Client, endpoint: &str, exchange: &str) -> Graph {
+        Graph {
+            auth,
+            http,
+            base: format!("{}/v1.0", endpoint.trim_end_matches('/')),
+            exchange: exchange.trim_end_matches('/').to_string(),
+            exchange_tenant: OnceLock::new(),
+        }
+    }
+
+    pub fn exchange_endpoint(&self) -> &str {
+        &self.exchange
     }
 
     fn url(&self, path: &str) -> String {
@@ -32,14 +45,27 @@ impl Graph {
     }
 
     fn send(&self, method: Method, path: &str, body: Option<&Value>, eventual: bool) -> Result<Value> {
-        let url = self.url(path);
+        let headers: &[(&str, &str)] = if eventual { &[("ConsistencyLevel", "eventual")] } else { &[] };
+        self.send_to(Api::Graph, method, &self.url(path), path, body, headers)
+    }
+
+    /// Sends a request to `url` on `api`, retrying when throttled. `path` names it in the log.
+    pub(crate) fn send_to(
+        &self,
+        api: Api,
+        method: Method,
+        url: &str,
+        path: &str,
+        body: Option<&Value>,
+        headers: &[(&str, &str)],
+    ) -> Result<Value> {
         for attempt in 0..4 {
             let mut req: RequestBuilder = self
                 .http
-                .request(method.clone(), &url)
-                .bearer_auth(self.auth.token()?);
-            if eventual {
-                req = req.header("ConsistencyLevel", "eventual");
+                .request(method.clone(), url)
+                .bearer_auth(self.auth.token_for(api)?);
+            for (k, v) in headers {
+                req = req.header(*k, *v);
             }
             if let Some(b) = body {
                 req = req.json(b);
@@ -70,7 +96,7 @@ impl Graph {
             let text = resp.text()?;
             if !status.is_success() {
                 log::error!("{method} {path} -> {status} in {ms} ms (request-id {request_id}): {}", text.chars().take(2000).collect::<String>());
-                bail!(graph_error(status, &text));
+                bail!(graph_error(api, status, &text));
             }
             log::debug!("{method} {path} -> {status} in {ms} ms ({} bytes, request-id {request_id})", text.len());
             if text.trim().is_empty() {
@@ -78,7 +104,7 @@ impl Graph {
             }
             return Ok(serde_json::from_str(&text)?);
         }
-        bail!("Microsoft Graph is throttling requests; try again shortly.")
+        bail!("{} is throttling requests; try again shortly.", if api == Api::Graph { "Microsoft Graph" } else { "Exchange Online" })
     }
 
     pub fn get(&self, path: &str) -> Result<Value> {
@@ -129,9 +155,11 @@ impl Graph {
     }
 }
 
-fn graph_error(status: StatusCode, text: &str) -> String {
+fn graph_error(api: Api, status: StatusCode, text: &str) -> String {
     let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
     match v["error"]["message"].as_str() {
+        // Exchange puts the exception type and a code in front of the message, between bars.
+        Some(msg) if api == Api::Exchange => msg.rsplit('|').next().unwrap_or(msg).trim().to_string(),
         Some(msg) => format!("{} ({}): {}", v["error"]["code"].as_str().unwrap_or("Error"), status.as_u16(), msg),
         None => format!("HTTP {}: {}", status, text.chars().take(300).collect::<String>()),
     }

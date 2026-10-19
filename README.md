@@ -11,6 +11,8 @@ and talks to Microsoft Graph directly.
 | **Groups** | Create (security / Microsoft 365, optionally role-assignable), edit, delete; manage members (also in bulk from CSV), owners, licences and **directory role assignments** |
 | **Devices** | View details, owners, users and group membership; enable/disable; delete |
 | **Applications** | View the enterprise applications connected to the tenant; enable/disable sign-in; delete; set whether assignment is required and whether users see them; manage the users and groups assigned, owners, and review or revoke the permissions granted to them |
+| **Exchange Online › Mailboxes** | Create shared mailboxes; convert between user and shared mailboxes; set forwarding and automatic replies; give Full Access, Send As and Send on behalf; hide from address lists; delete shared, room and equipment mailboxes |
+| **Exchange Online › Distribution lists** | Create distribution lists and mail-enabled security groups, edit, delete and manage members |
 | **Licences** | View subscriptions, service plans and licensed users; assign or remove licences |
 
 ## Setup
@@ -26,6 +28,10 @@ and talks to Microsoft Graph directly.
    device code (it opens your browser for you).
 
 The permissions are delegated: what you can actually change is still limited by your own Entra roles.
+
+For the Exchange Online node, also add the *delegated* **Office 365 Exchange Online** permission
+`Exchange.Manage` (under **APIs my organization uses**) and grant admin consent; see
+[Exchange Online](#exchange-online) below.
 
 **Upgrading from 1.1.0:** the last three permissions are new, for the Applications node. After you
 sign in, Graphical Cloud Management checks whether they have been granted:
@@ -61,6 +67,7 @@ scopes = User.ReadWrite.All Group.ReadWrite.All ...
 [cloud]
 authority_host = https://login.microsoftonline.com
 graph_endpoint = https://graph.microsoft.com
+exchange_endpoint = https://outlook.office365.com
 
 [logging]
 level = debug
@@ -78,9 +85,29 @@ saved to `token.json` in the same folder (owner-only permissions on macOS/Linux)
 each time the app starts. **File › Sign out** deletes it. The `[cloud]` section lets you point at a
 national cloud.
 
+## Exchange Online
+
+The **Exchange Online** node manages mailboxes and distribution lists. Microsoft Graph can't do this,
+and Exchange Online has no documented REST API for it, so Graphical Cloud Management uses the same
+REST endpoint as the Exchange Online PowerShell module (`/adminapi/beta/{tenant}/InvokeCommand`), which
+runs Exchange cmdlets such as `Get-Mailbox` and `Set-Mailbox`. Microsoft could change that endpoint
+without notice. Every request is logged with the cmdlet's name, so `output.log` shows what was run.
+
+- It needs the delegated `Exchange.Manage` permission on Office 365 Exchange Online. If that hasn't
+  been granted, opening Mailboxes or Distribution lists offers to approve it by signing in again as a
+  Global Administrator; your sign-in is kept if that is cancelled.
+- Changing things needs an Exchange role, such as Exchange Administrator. Without one, lists may load
+  but changes fail with Exchange's own error message.
+- Changing a distribution list you don't own uses `-BypassSecurityGroupManagerCheck`, which
+  Exchange Administrators are allowed to use.
+- Automatic reply times are entered in UTC.
+- A user's mailbox can't be deleted here: delete the user under Users, or remove their licence.
+- For a national cloud, set `exchange_endpoint` in the `[cloud]` section of `settings.ini`, and
+  `exchange_scopes` in `[auth]` if the permission has another name there.
+
 ## CSV import and export
 
-**Export list…** in the Action menu saves the current list (users, groups, devices, applications or licences) to a
+**Export list…** in the Action menu saves the current list to a
 CSV file, with the columns shown plus each object's ID. It saves what's on screen, so filter and sort
 first to export part of a list. The file is UTF-8 with a byte order mark, so Excel shows accented
 names correctly. A value Excel would run as a formula (one starting with `=`, `+`, `-` or `@`) is
@@ -162,7 +189,7 @@ Everything works without a mouse. Press **F1** in the app for the full list.
 | F10 | Menu bar |
 | F5 | Refresh |
 | Ctrl/⌘+F | Filter the list |
-| Ctrl/⌘+N | New user / group |
+| Ctrl/⌘+N | New user, group, shared mailbox or distribution list |
 | Delete | Delete |
 | Ctrl/⌘+E, P, L, G, M, R, U | Enable/disable, reset password, assign licence, add to group, add member, assign role, assign licence to user or user/group to application |
 | Ctrl+Tab, Insert, Delete, F2 | Property sheets: next tab, add, remove, edit |

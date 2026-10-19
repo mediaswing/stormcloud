@@ -27,6 +27,9 @@ pub enum Act {
     ExportDatabase,
     ImportUsers,
     ImportMembers,
+    Forwarding,
+    AutoReplies,
+    ConvertMailbox,
 }
 
 impl Act {
@@ -45,7 +48,13 @@ impl Act {
             Act::AssignRole => vec![cmd(Key::R)],
             Act::AssignToUser => vec![cmd(Key::U)],
             Act::Delete => vec![KeyboardShortcut::new(Modifiers::NONE, Key::Delete), cmd(Key::Backspace)],
-            Act::ExportList | Act::ExportDatabase | Act::ImportUsers | Act::ImportMembers => vec![],
+            Act::ExportList
+            | Act::ExportDatabase
+            | Act::ImportUsers
+            | Act::ImportMembers
+            | Act::Forwarding
+            | Act::AutoReplies
+            | Act::ConvertMailbox => vec![],
         }
     }
 
@@ -58,9 +67,9 @@ impl Act {
 pub fn node_actions(node: Node) -> Vec<Act> {
     match node {
         Node::Users => vec![Act::New, Act::ImportUsers, Act::ExportList, Act::ExportDatabase, Act::Refresh],
-        Node::Groups => vec![Act::New, Act::ExportList, Act::ExportDatabase, Act::Refresh],
+        Node::Groups | Node::Mailboxes | Node::DistributionLists => vec![Act::New, Act::ExportList, Act::ExportDatabase, Act::Refresh],
         Node::Devices | Node::Applications | Node::Licences => vec![Act::ExportList, Act::ExportDatabase, Act::Refresh],
-        Node::Root => vec![],
+        Node::Root | Node::Exchange => vec![],
     }
 }
 
@@ -68,7 +77,9 @@ pub fn node_actions(node: Node) -> Vec<Act> {
 pub fn item_actions(node: Node) -> Vec<Act> {
     use Act::*;
     match node {
-        Node::Root => vec![Open],
+        Node::Root | Node::Exchange => vec![Open],
+        Node::Mailboxes => vec![Properties, Forwarding, AutoReplies, ConvertMailbox, Delete],
+        Node::DistributionLists => vec![Properties, AddMember, Delete],
         Node::Users => vec![Properties, ToggleEnabled, ResetPassword, AssignLicence, AddToGroup, AssignRole, Delete],
         Node::Groups => vec![Properties, AddMember, ImportMembers, AssignRole, AssignLicence, Delete],
         Node::Devices => vec![Properties, ToggleEnabled, Delete],
@@ -85,7 +96,7 @@ pub fn collection(node: Node) -> &'static str {
         Node::Devices => "devices",
         Node::Applications => "servicePrincipals",
         Node::Licences => "subscribedSkus",
-        Node::Root => "",
+        Node::Root | Node::Exchange | Node::Mailboxes | Node::DistributionLists => "",
     }
 }
 
@@ -98,6 +109,8 @@ impl App {
             Act::New => match self.node {
                 Node::Users => "New user…",
                 Node::Groups => "New group…",
+                Node::Mailboxes => "New shared mailbox…",
+                Node::DistributionLists => "New distribution list…",
                 _ => "New…",
             }
             .into(),
@@ -123,6 +136,13 @@ impl App {
             Act::ExportDatabase => "Export to MariaDB…".into(),
             Act::ImportUsers => "Import users from CSV…".into(),
             Act::ImportMembers => "Add members from CSV…".into(),
+            Act::Forwarding => "Forwarding…".into(),
+            Act::AutoReplies => "Automatic replies…".into(),
+            Act::ConvertMailbox => match self.selected().map(|o| s(o, "RecipientTypeDetails")).as_deref() {
+                Some("SharedMailbox") => "Convert to user mailbox",
+                _ => "Convert to shared mailbox",
+            }
+            .into(),
         }
     }
 
@@ -146,6 +166,8 @@ impl App {
             Act::New => match node {
                 Node::Users => self.new_user(),
                 Node::Groups => self.new_group(),
+                Node::Mailboxes => self.new_shared_mailbox(),
+                Node::DistributionLists => self.new_distribution_list(),
                 _ => {}
             },
             Act::ToggleEnabled => self.toggle_enabled(node, obj),
@@ -159,6 +181,7 @@ impl App {
             Act::AddToGroup => self.pick_group(&format!("Add {name} to group"), move |app, g| {
                 app.add_member(&g.id, &id, |_| {});
             }),
+            Act::AddMember if node == Node::DistributionLists => self.add_list_member(obj, |_| {}),
             Act::AddMember => self.pick_principal(&format!("Add member to {name}"), move |app, m| {
                 app.add_member(&id, &m.id, |_| {});
             }),
@@ -182,11 +205,15 @@ impl App {
                     app.set_licence("users", &u.id, &sku, true, |app| app.load(Node::Licences));
                 });
             }
+            Act::Delete if matches!(node, Node::Mailboxes | Node::DistributionLists) => self.delete_exchange(node, obj),
             Act::Delete => self.delete_obj(node, id, name),
             Act::ExportList => self.export_list(),
             Act::ExportDatabase => self.export_database(),
             Act::ImportUsers => self.import_users(),
             Act::ImportMembers => self.import_members(obj),
+            Act::Forwarding => self.edit_mailbox(obj, |_| {}),
+            Act::AutoReplies => self.edit_auto_replies(obj, |_| {}),
+            Act::ConvertMailbox => self.convert_mailbox(obj),
         }
     }
 

@@ -9,7 +9,19 @@ pub enum Node {
     Groups,
     Devices,
     Applications,
+    Exchange,
+    Mailboxes,
+    DistributionLists,
     Licences,
+}
+
+/// Where a node's list comes from.
+#[derive(Clone, Copy, Debug)]
+pub enum Source {
+    /// A Microsoft Graph collection.
+    Graph(&'static str),
+    /// Exchange Online cmdlets (see `exchange::list`).
+    Exchange,
 }
 
 /// Order and depth of the console tree.
@@ -19,6 +31,9 @@ pub const TREE: &[(Node, usize)] = &[
     (Node::Groups, 1),
     (Node::Devices, 1),
     (Node::Applications, 1),
+    (Node::Exchange, 1),
+    (Node::Mailboxes, 2),
+    (Node::DistributionLists, 2),
     (Node::Licences, 1),
 ];
 
@@ -36,6 +51,9 @@ impl Node {
             Node::Groups => "Groups",
             Node::Devices => "Devices",
             Node::Applications => "Applications",
+            Node::Exchange => "Exchange Online",
+            Node::Mailboxes => "Mailboxes",
+            Node::DistributionLists => "Distribution lists",
             Node::Licences => "Licences",
         }
     }
@@ -47,6 +65,9 @@ impl Node {
             Node::Groups => "👥",
             Node::Devices => "💻",
             Node::Applications => "🧩",
+            Node::Exchange => "📧",
+            Node::Mailboxes => "📬",
+            Node::DistributionLists => "📨",
             Node::Licences => "🎫",
         }
     }
@@ -54,12 +75,13 @@ impl Node {
     pub fn parent(self) -> Option<Node> {
         match self {
             Node::Root => None,
+            Node::Mailboxes | Node::DistributionLists => Some(Node::Exchange),
             _ => Some(Node::Root),
         }
     }
 
     pub fn has_children(self) -> bool {
-        self == Node::Root
+        matches!(self, Node::Root | Node::Exchange)
     }
 
     /// Singular noun for the objects listed under this node.
@@ -69,20 +91,23 @@ impl Node {
             Node::Groups => "group",
             Node::Devices => "device",
             Node::Applications => "application",
+            Node::Mailboxes => "mailbox",
+            Node::DistributionLists => "distribution list",
             Node::Licences => "licence",
-            Node::Root => "item",
+            Node::Root | Node::Exchange => "item",
         }
     }
 
-    pub fn endpoint(self) -> Option<&'static str> {
-        Some(match self {
+    pub fn endpoint(self) -> Option<Source> {
+        Some(Source::Graph(match self {
             Node::Users => "/users?$select=id,displayName,userPrincipalName,mail,accountEnabled,userType,jobTitle,department,usageLocation,createdDateTime,assignedLicenses&$top=999",
             Node::Groups => "/groups?$select=id,displayName,description,mail,mailEnabled,mailNickname,securityEnabled,groupTypes,isAssignableToRole,membershipRule,createdDateTime,assignedLicenses&$top=999",
             Node::Devices => "/devices?$select=id,deviceId,displayName,operatingSystem,operatingSystemVersion,trustType,accountEnabled,approximateLastSignInDateTime,isCompliant,isManaged,registrationDateTime&$top=999",
             Node::Applications => "/servicePrincipals?$select=id,appId,displayName,publisherName,appOwnerOrganizationId,servicePrincipalType,accountEnabled,appRoleAssignmentRequired,tags,appRoles,homepage&$top=999",
             Node::Licences => "/subscribedSkus",
-            Node::Root => return None,
-        })
+            Node::Mailboxes | Node::DistributionLists => return Some(Source::Exchange),
+            Node::Root | Node::Exchange => return None,
+        }))
     }
 
     pub fn columns(self) -> Vec<Column> {
@@ -137,7 +162,21 @@ impl Node {
                 c("Status", 90.0, |v| s(v, "capabilityStatus")),
                 c("Applies to", 90.0, |v| s(v, "appliesTo")),
             ],
-            Node::Root => vec![
+            Node::Mailboxes => vec![
+                c("Display name", 220.0, |v| s(v, "DisplayName")),
+                c("Email address", 260.0, |v| s(v, "PrimarySmtpAddress")),
+                c("Type", 90.0, crate::exchange::mailbox_type),
+                c("Forwarding to", 220.0, crate::exchange::forwarding),
+                c("Hidden", 70.0, |v| yes_no(&v["HiddenFromAddressListsEnabled"])),
+            ],
+            Node::DistributionLists => vec![
+                c("Display name", 220.0, |v| s(v, "DisplayName")),
+                c("Email address", 260.0, |v| s(v, "PrimarySmtpAddress")),
+                c("Type", 160.0, crate::exchange::group_type),
+                c("Internal senders only", 140.0, |v| yes_no(&v["RequireSenderAuthenticationEnabled"])),
+                c("Hidden", 70.0, |v| yes_no(&v["HiddenFromAddressListsEnabled"])),
+            ],
+            Node::Root | Node::Exchange => vec![
                 c("Name", 240.0, |v| s(v, "name")),
                 c("Description", 400.0, |v| s(v, "description")),
             ],
@@ -161,7 +200,8 @@ impl Node {
     pub fn object_name(self, v: &Value) -> String {
         match self {
             Node::Licences => sku_name(&s(v, "skuPartNumber")),
-            Node::Root => s(v, "name"),
+            Node::Root | Node::Exchange => s(v, "name"),
+            Node::Mailboxes | Node::DistributionLists => s(v, "DisplayName"),
             _ => s(v, "displayName"),
         }
     }

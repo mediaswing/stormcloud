@@ -3,10 +3,38 @@
 use crate::config::{token_path, Settings};
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// The services the app gets access tokens for. One sign-in (refresh token) covers both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Api {
+    #[default]
+    Graph,
+    Exchange,
+}
+
+/// The sign-in has not been granted the permissions an API needs, so someone has to consent.
+#[derive(Debug)]
+pub struct NeedsConsent(pub Api);
+
+impl std::fmt::Display for NeedsConsent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Api::Exchange => f.write_str(
+                "This app has not been granted the Exchange.Manage permission on Office 365 Exchange Online, \
+                 which managing Exchange needs. An administrator can add it to the app registration's API \
+                 permissions and grant admin consent.",
+            ),
+            Api::Graph => f.write_str("This app has not been granted the Microsoft Graph permissions it asks for."),
+        }
+    }
+}
+
+impl std::error::Error for NeedsConsent {}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct DeviceCode {
@@ -16,6 +44,9 @@ pub struct DeviceCode {
     pub expires_in: u64,
     pub interval: Option<u64>,
     pub message: String,
+    /// The API the sign-in asks for scopes on.
+    #[serde(skip)]
+    pub api: Api,
 }
 
 #[derive(Deserialize)]
@@ -33,8 +64,8 @@ struct ErrorResponse {
 
 #[derive(Default)]
 struct Tokens {
-    access_token: Option<String>,
-    expires_at: Option<Instant>,
+    /// Access tokens and when they expire, for each API.
+    access: HashMap<Api, (String, Instant)>,
     refresh_token: Option<String>,
     /// Keep the refresh token on disk. Held with the tokens, so a refresh finishing on another
     /// thread can't write the file back after it was turned off.
@@ -91,19 +122,19 @@ impl Auth {
         )
     }
 
-    fn scopes(&self) -> String {
-        self.scopes_with(&[])
-    }
-
-    /// The `scope` parameter for the scopes asked for plus `extra`.
-    fn scopes_with(&self, extra: &[String]) -> String {
+    /// The `scope` parameter for the scopes asked for on `api`, plus `extra`. A token request can
+    /// only name scopes on one API.
+    fn scopes_with(&self, api: Api, extra: &[String]) -> String {
         let mut scopes: Vec<String> = Vec::new();
-        let current = self.scopes.lock().unwrap().clone();
+        let (current, base) = match api {
+            Api::Graph => (self.scopes.lock().unwrap().clone(), &self.settings.graph_endpoint),
+            Api::Exchange => (self.settings.exchange_scopes.clone(), &self.settings.exchange_endpoint),
+        };
         for s in current.split_whitespace().chain(extra.iter().map(String::as_str)) {
             let full = if s.contains("://") || s == "offline_access" {
                 s.to_string()
             } else {
-                format!("{}/{}", self.settings.graph_endpoint, s)
+                format!("{base}/{s}")
             };
             scopes.push(full);
         }
@@ -115,10 +146,10 @@ impl Auth {
         self.tokens.lock().unwrap().refresh_token.is_some()
     }
 
-    /// Starts a device code sign-in asking for the usual scopes plus `extra`, which are not
-    /// added to the scopes asked for later until [`Auth::add_scopes`] is called.
-    pub fn start_device_code(&self, extra: &[String]) -> Result<DeviceCode> {
-        let scopes = self.scopes_with(extra);
+    /// Starts a device code sign-in asking for the usual scopes on `api` plus `extra`, which are
+    /// not added to the scopes asked for later until [`Auth::add_scopes`] is called.
+    pub fn start_device_code(&self, api: Api, extra: &[String]) -> Result<DeviceCode> {
+        let scopes = self.scopes_with(api, extra);
         log::info!(
             "Requesting device code: tenant={} client_id={} scopes=[{}]",
             self.settings.tenant_id.trim(),
@@ -137,7 +168,8 @@ impl Auth {
             log::error!("Device code request rejected: {text}");
             bail!(describe_error(text));
         }
-        let dc: DeviceCode = resp.json()?;
+        let mut dc: DeviceCode = resp.json()?;
+        dc.api = api;
         log::info!("Device code issued; expires in {}s, waiting for user", dc.expires_in);
         Ok(dc)
     }
@@ -162,7 +194,7 @@ impl Auth {
                 ])
                 .send()?;
             if resp.status().is_success() {
-                self.store(resp.json()?);
+                self.store(dc.api, resp.json()?);
                 log::info!("Device code sign-in completed");
                 return Ok(());
             }
@@ -181,9 +213,9 @@ impl Auth {
         }
     }
 
-    fn refresh(&self, refresh_token: &str) -> Result<()> {
-        log::debug!("Refreshing access token");
-        let scopes = self.scopes();
+    fn refresh(&self, api: Api, refresh_token: &str) -> Result<()> {
+        log::debug!("Refreshing {api:?} access token");
+        let scopes = self.scopes_with(api, &[]);
         let resp = self
             .http
             .post(self.endpoint("token"))
@@ -203,14 +235,22 @@ impl Auth {
                 log::warn!("Token refresh failed with {status}; keeping the cached sign-in: {text}");
                 bail!("Could not refresh the sign-in ({status}): {}", describe_error(text));
             }
+            if api != Api::Graph {
+                // The sign-in itself is fine; it just hasn't been granted this API.
+                log::warn!("No {api:?} token for this sign-in: {text}");
+                if text.contains("consent_required") || text.contains("AADSTS65001") {
+                    return Err(NeedsConsent(api).into());
+                }
+                bail!(describe_error(text));
+            }
             log::warn!("Token refresh rejected; discarding cached sign-in: {text}");
             let mut t = self.tokens.lock().unwrap();
             *t = Tokens { remember: t.remember, ..Default::default() };
             let _ = fs::remove_file(token_path());
             bail!(describe_error(text));
         }
-        self.store(resp.json()?);
-        log::debug!("Access token refreshed");
+        self.store(api, resp.json()?);
+        log::debug!("{api:?} access token refreshed");
         Ok(())
     }
 
@@ -225,7 +265,7 @@ impl Auth {
     /// leaving the sign-in as it was.
     pub fn try_add_scopes(&self, extra: &[String]) -> Result<bool> {
         let rt = self.tokens.lock().unwrap().refresh_token.clone().ok_or_else(|| anyhow!("Not signed in."))?;
-        let scopes = self.scopes_with(extra);
+        let scopes = self.scopes_with(Api::Graph, extra);
         log::debug!("Asking for more scopes: [{}]", extra.join(" "));
         let resp = self
             .http
@@ -247,16 +287,15 @@ impl Auth {
             log::warn!("Asking for more scopes failed with {status}: {text}");
             bail!("Could not ask for more permissions ({status}): {}", describe_error(text));
         }
-        self.store(resp.json()?);
+        self.store(Api::Graph, resp.json()?);
         self.add_scopes(extra);
         log::info!("Granted more scopes: [{}]", extra.join(" "));
         Ok(true)
     }
 
-    fn store(&self, tr: TokenResponse) {
+    fn store(&self, api: Api, tr: TokenResponse) {
         let mut t = self.tokens.lock().unwrap();
-        t.access_token = Some(tr.access_token);
-        t.expires_at = Some(Instant::now() + Duration::from_secs(tr.expires_in));
+        t.access.insert(api, (tr.access_token, Instant::now() + Duration::from_secs(tr.expires_in)));
         if let Some(rt) = tr.refresh_token {
             if t.remember {
                 save_refresh_token(&rt);
@@ -265,23 +304,25 @@ impl Auth {
         }
     }
 
-    /// Returns a valid access token, refreshing it if it is close to expiry.
-    pub fn token(&self) -> Result<String> {
+    /// Returns a valid access token for `api`, refreshing it if it is close to expiry. Fails
+    /// with [`NeedsConsent`] when the sign-in hasn't been granted that API.
+    pub fn token_for(&self, api: Api) -> Result<String> {
         let refresh_token = {
             let t = self.tokens.lock().unwrap();
-            if let (Some(at), Some(exp)) = (&t.access_token, t.expires_at)
-                && exp > Instant::now() + Duration::from_secs(120) {
+            if let Some((at, exp)) = t.access.get(&api)
+                && *exp > Instant::now() + Duration::from_secs(120) {
                     return Ok(at.clone());
                 }
             t.refresh_token.clone()
         };
         let rt = refresh_token.ok_or_else(|| anyhow!("Not signed in. Choose File > Sign in."))?;
-        self.refresh(&rt)?;
+        self.refresh(api, &rt)?;
         self.tokens
             .lock()
             .unwrap()
-            .access_token
-            .clone()
+            .access
+            .get(&api)
+            .map(|(at, _)| at.clone())
             .ok_or_else(|| anyhow!("No access token"))
     }
 
