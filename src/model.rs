@@ -8,6 +8,7 @@ pub enum Node {
     Users,
     Groups,
     Devices,
+    Applications,
     Licences,
 }
 
@@ -17,6 +18,7 @@ pub const TREE: &[(Node, usize)] = &[
     (Node::Users, 1),
     (Node::Groups, 1),
     (Node::Devices, 1),
+    (Node::Applications, 1),
     (Node::Licences, 1),
 ];
 
@@ -33,6 +35,7 @@ impl Node {
             Node::Users => "Users",
             Node::Groups => "Groups",
             Node::Devices => "Devices",
+            Node::Applications => "Applications",
             Node::Licences => "Licences",
         }
     }
@@ -43,6 +46,7 @@ impl Node {
             Node::Users => "👤",
             Node::Groups => "👥",
             Node::Devices => "💻",
+            Node::Applications => "🧩",
             Node::Licences => "🎫",
         }
     }
@@ -64,6 +68,7 @@ impl Node {
             Node::Users => "user",
             Node::Groups => "group",
             Node::Devices => "device",
+            Node::Applications => "application",
             Node::Licences => "licence",
             Node::Root => "item",
         }
@@ -74,6 +79,7 @@ impl Node {
             Node::Users => "/users?$select=id,displayName,userPrincipalName,mail,accountEnabled,userType,jobTitle,department,usageLocation,createdDateTime,assignedLicenses&$top=999",
             Node::Groups => "/groups?$select=id,displayName,description,mail,mailEnabled,mailNickname,securityEnabled,groupTypes,isAssignableToRole,membershipRule,createdDateTime,assignedLicenses&$top=999",
             Node::Devices => "/devices?$select=id,deviceId,displayName,operatingSystem,operatingSystemVersion,trustType,accountEnabled,approximateLastSignInDateTime,isCompliant,isManaged,registrationDateTime&$top=999",
+            Node::Applications => "/servicePrincipals?$select=id,appId,displayName,publisherName,appOwnerOrganizationId,servicePrincipalType,accountEnabled,appRoleAssignmentRequired,tags,appRoles,homepage&$top=999",
             Node::Licences => "/subscribedSkus",
             Node::Root => return None,
         })
@@ -111,6 +117,14 @@ impl Node {
                 c("Managed", 80.0, |v| yes_no(&v["isManaged"])),
                 c("Last sign-in", 140.0, |v| date(&v["approximateLastSignInDateTime"])),
             ],
+            Node::Applications => vec![
+                c("Name", 220.0, |v| s(v, "displayName")),
+                c("Publisher", 180.0, |v| s(v, "publisherName")),
+                c("Enabled", 70.0, |v| yes_no(&v["accountEnabled"])),
+                c("Assignment required", 130.0, |v| yes_no(&v["appRoleAssignmentRequired"])),
+                c("Visible to users", 110.0, |v| yes_no(&visible_to_users(v))),
+                c("Application ID", 280.0, |v| s(v, "appId")),
+            ],
             Node::Licences => vec![
                 c("Product", 260.0, |v| sku_name(&s(v, "skuPartNumber"))),
                 c("SKU", 200.0, |v| s(v, "skuPartNumber")),
@@ -130,6 +144,19 @@ impl Node {
         }
     }
 
+    /// Whether an object returned by [`Node::endpoint`] belongs in the list. Applications leaves
+    /// out managed identities and Microsoft's own service principals, of which every tenant has
+    /// hundreds, as the Entra admin centre's Enterprise applications list does.
+    pub fn keep(self, v: &Value) -> bool {
+        match self {
+            Node::Applications => {
+                v["servicePrincipalType"] == "Application"
+                    && !MICROSOFT_TENANTS.contains(&s(v, "appOwnerOrganizationId").as_str())
+            }
+            _ => true,
+        }
+    }
+
     /// The label used to refer to an object of this node in dialogs.
     pub fn object_name(self, v: &Value) -> String {
         match self {
@@ -137,6 +164,19 @@ impl Node {
             Node::Root => s(v, "name"),
             _ => s(v, "displayName"),
         }
+    }
+}
+
+/// Tenants that own Microsoft's first-party applications.
+const MICROSOFT_TENANTS: [&str; 2] = ["f8cdef31-a31e-4b4a-93e4-5f571e91255a", "72f988bf-86f1-41af-91ab-2d7cd011db47"];
+
+/// Tag that hides an application from users' My Apps portal and the Microsoft 365 app launcher.
+pub const HIDE_APP_TAG: &str = "HideApp";
+
+pub fn visible_to_users(v: &Value) -> Value {
+    match v["tags"].as_array() {
+        Some(tags) => Value::Bool(!tags.iter().any(|t| t == HIDE_APP_TAG)),
+        None => Value::Null,
     }
 }
 

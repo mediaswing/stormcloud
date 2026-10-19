@@ -4,6 +4,20 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Applications:** a new node listing the enterprise applications connected to the tenant (as in
+  the Entra admin centre, leaving out Microsoft's own applications and managed identities).
+  Enable or disable sign-in, delete, and set whether assignment is required and whether users see
+  the application. Its properties show the users and groups assigned (with their app role), its
+  owners, and the application and delegated permissions granted to it, which can be revoked.
+- New default scopes `Application.ReadWrite.All`, `AppRoleAssignment.ReadWrite.All` and
+  `DelegatedPermissionGrant.ReadWrite.All`. After signing in, they are added to a saved Scopes
+  setting without them once granted; if they haven't been, you are asked once whether an
+  administrator wants to approve them. Sign-in is never refused because of them.
+
 ## [1.1.0] - 2026-10-18
 
 Adds exporting a list to a MariaDB server, and fixes bugs in sign-in and the result list.

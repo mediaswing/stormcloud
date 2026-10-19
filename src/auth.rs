@@ -45,6 +45,8 @@ pub struct Auth {
     settings: Settings,
     http: reqwest::blocking::Client,
     tokens: Mutex<Tokens>,
+    /// The scopes asked for, which start as `settings.scopes` and grow when more are granted.
+    scopes: Mutex<String>,
 }
 
 impl Auth {
@@ -58,10 +60,12 @@ impl Auth {
             None
         };
         let remember = settings.remember_sign_in;
+        let scopes = Mutex::new(settings.scopes.clone());
         Auth {
             settings,
             http,
             tokens: Mutex::new(Tokens { refresh_token, remember, ..Default::default() }),
+            scopes,
         }
     }
 
@@ -88,8 +92,14 @@ impl Auth {
     }
 
     fn scopes(&self) -> String {
+        self.scopes_with(&[])
+    }
+
+    /// The `scope` parameter for the scopes asked for plus `extra`.
+    fn scopes_with(&self, extra: &[String]) -> String {
         let mut scopes: Vec<String> = Vec::new();
-        for s in self.settings.scopes.split_whitespace() {
+        let current = self.scopes.lock().unwrap().clone();
+        for s in current.split_whitespace().chain(extra.iter().map(String::as_str)) {
             let full = if s.contains("://") || s == "offline_access" {
                 s.to_string()
             } else {
@@ -105,17 +115,20 @@ impl Auth {
         self.tokens.lock().unwrap().refresh_token.is_some()
     }
 
-    pub fn start_device_code(&self) -> Result<DeviceCode> {
+    /// Starts a device code sign-in asking for the usual scopes plus `extra`, which are not
+    /// added to the scopes asked for later until [`Auth::add_scopes`] is called.
+    pub fn start_device_code(&self, extra: &[String]) -> Result<DeviceCode> {
+        let scopes = self.scopes_with(extra);
         log::info!(
             "Requesting device code: tenant={} client_id={} scopes=[{}]",
             self.settings.tenant_id.trim(),
             self.settings.client_id.trim(),
-            self.scopes()
+            scopes
         );
         let resp = self
             .http
             .post(self.endpoint("devicecode"))
-            .form(&[("client_id", self.settings.client_id.trim()), ("scope", &self.scopes())])
+            .form(&[("client_id", self.settings.client_id.trim()), ("scope", &scopes)])
             .send()
             .inspect_err(|e| log::error!("Device code request failed: {e}"))?;
         if !resp.status().is_success() {
@@ -199,6 +212,45 @@ impl Auth {
         self.store(resp.json()?);
         log::debug!("Access token refreshed");
         Ok(())
+    }
+
+    /// Adds `extra` to the scopes asked for from now on.
+    pub fn add_scopes(&self, extra: &[String]) {
+        let mut scopes = self.scopes.lock().unwrap();
+        *scopes = scopes.split_whitespace().map(str::to_string).chain(extra.iter().cloned()).collect::<Vec<_>>().join(" ");
+    }
+
+    /// Asks for `extra` scopes as well, using the refresh token, so that no one has to sign in.
+    /// Returns true when they were granted (and adds them), or false when they need consent,
+    /// leaving the sign-in as it was.
+    pub fn try_add_scopes(&self, extra: &[String]) -> Result<bool> {
+        let rt = self.tokens.lock().unwrap().refresh_token.clone().ok_or_else(|| anyhow!("Not signed in."))?;
+        let scopes = self.scopes_with(extra);
+        log::debug!("Asking for more scopes: [{}]", extra.join(" "));
+        let resp = self
+            .http
+            .post(self.endpoint("token"))
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("client_id", self.settings.client_id.trim()),
+                ("refresh_token", rt.as_str()),
+                ("scope", scopes.as_str()),
+            ])
+            .send()?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().unwrap_or_default();
+            if sign_in_rejected(&text) || text.contains("consent_required") {
+                log::info!("More scopes need consent: {text}");
+                return Ok(false);
+            }
+            log::warn!("Asking for more scopes failed with {status}: {text}");
+            bail!("Could not ask for more permissions ({status}): {}", describe_error(text));
+        }
+        self.store(resp.json()?);
+        self.add_scopes(extra);
+        log::info!("Granted more scopes: [{}]", extra.join(" "));
+        Ok(true)
     }
 
     fn store(&self, tr: TokenResponse) {

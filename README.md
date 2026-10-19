@@ -10,6 +10,7 @@ and talks to Microsoft Graph directly.
 | **Users** | Create (one at a time or in bulk from CSV), edit, enable/disable, delete, reset password; manage group membership, licences and directory roles |
 | **Groups** | Create (security / Microsoft 365, optionally role-assignable), edit, delete; manage members (also in bulk from CSV), owners, licences and **directory role assignments** |
 | **Devices** | View details, owners, users and group membership; enable/disable; delete |
+| **Applications** | View the enterprise applications connected to the tenant; enable/disable sign-in; delete; set whether assignment is required and whether users see them; manage the users and groups assigned, owners, and review or revoke the permissions granted to them |
 | **Licences** | View subscriptions, service plans and licensed users; assign or remove licences |
 
 ## Setup
@@ -19,11 +20,26 @@ and talks to Microsoft Graph directly.
 3. Under **API permissions**, add these *delegated* Microsoft Graph permissions and grant admin consent:
    `User.ReadWrite.All`, `Group.ReadWrite.All`, `Device.ReadWrite.All`, `Directory.Read.All`,
    `RoleManagement.ReadWrite.Directory`, `Organization.Read.All`, `LicenseAssignment.ReadWrite.All`,
-   `User-PasswordProfile.ReadWrite.All`.
+   `User-PasswordProfile.ReadWrite.All`, `Application.ReadWrite.All`, `AppRoleAssignment.ReadWrite.All`,
+   `DelegatedPermissionGrant.ReadWrite.All`.
 4. Run Graphical Cloud Management. On first launch it asks for the tenant ID and client ID, then signs you in with a
    device code (it opens your browser for you).
 
 The permissions are delegated: what you can actually change is still limited by your own Entra roles.
+
+**Upgrading from 1.1.0:** the last three permissions are new, for the Applications node. After you
+sign in, Graphical Cloud Management checks whether they have been granted:
+
+- If an administrator has already added them to the app registration and granted admin consent,
+  they are added to **Scopes** in `settings.ini` straight away, with nothing to approve.
+- If not, it asks once whether to approve them now. Signing in with the code it shows lets a Global
+  Administrator or Privileged Role Administrator tick **Consent on behalf of your organization**.
+  If that is cancelled or refused, you stay signed in as before. You are not asked again
+  (`app_scopes_offered = true` in `settings.ini`), but granting admin consent on the app registration
+  later still adds them at the next sign-in.
+
+Until they are granted you can view applications, but changing them fails with an "Insufficient
+privileges" error.
 
 ## Settings
 
@@ -64,7 +80,7 @@ national cloud.
 
 ## CSV import and export
 
-**Export list…** in the Action menu saves the current list (users, groups, devices or licences) to a
+**Export list…** in the Action menu saves the current list (users, groups, devices, applications or licences) to a
 CSV file, with the columns shown plus each object's ID. It saves what's on screen, so filter and sort
 first to export part of a list. The file is UTF-8 with a byte order mark, so Excel shows accented
 names correctly. A value Excel would run as a formula (one starting with `=`, `+`, `-` or `@`) is
@@ -148,7 +164,7 @@ Everything works without a mouse. Press **F1** in the app for the full list.
 | Ctrl/⌘+F | Filter the list |
 | Ctrl/⌘+N | New user / group |
 | Delete | Delete |
-| Ctrl/⌘+E, P, L, G, M, R, U | Enable/disable, reset password, assign licence, add to group, add member, assign role, assign licence to user |
+| Ctrl/⌘+E, P, L, G, M, R, U | Enable/disable, reset password, assign licence, add to group, add member, assign role, assign licence to user or user/group to application |
 | Ctrl+Tab, Insert, Delete, F2 | Property sheets: next tab, add, remove, edit |
 | Esc | Close dialog |
 

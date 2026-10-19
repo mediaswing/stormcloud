@@ -41,6 +41,8 @@ pub struct App {
 
     pub signed_in: bool,
     pub signin_gen: u64,
+    /// Bumped to drop the result of an approval of more permissions that was cancelled.
+    approval_gen: u64,
     pub account: String,
     pub tenant_name: String,
     pub domains: Vec<String>,
@@ -129,6 +131,7 @@ impl App {
             ctx: cc.egui_ctx.clone(),
             signed_in: false,
             signin_gen: 0,
+            approval_gen: 0,
             account: String::new(),
             tenant_name: String::new(),
             domains: Vec::new(),
@@ -287,7 +290,7 @@ impl App {
 
     fn device_code(&mut self, attempt: u64) {
         self.status = "Requesting sign-in code…".into();
-        self.spawn_auth(|a| a.start_device_code(), move |app, r| {
+        self.spawn_auth(|a| a.start_device_code(&[]), move |app, r| {
             if attempt != app.signin_gen {
                 return;
             }
@@ -299,6 +302,7 @@ impl App {
                 message: dc.message.clone(),
                 uri: dc.verification_uri.clone(),
                 code: dc.user_code.clone(),
+                approval: false,
             });
             app.status = "Waiting for sign-in in your browser…".into();
             app.spawn_auth(
@@ -329,6 +333,116 @@ impl App {
         self.status = "Sign-in cancelled".into();
     }
 
+    /// Adds the scopes the Applications node needs to a Scopes setting saved without them:
+    /// quietly when they have already been granted, or else by asking, once, for an
+    /// administrator to approve them.
+    fn add_app_scopes(&mut self) {
+        let missing = crate::config::missing_scopes(&self.settings.scopes, &crate::config::APP_SCOPES);
+        if missing.is_empty() {
+            return;
+        }
+        let session = self.signin_gen;
+        let ask = missing.clone();
+        self.spawn_auth(move |a| a.try_add_scopes(&ask), move |app, r| {
+            if session != app.signin_gen {
+                return;
+            }
+            match r {
+                Ok(true) => app.save_scopes(&missing),
+                Ok(false) if !app.settings.app_scopes_offered => app.offer_app_scopes(missing),
+                Ok(false) => log::info!("The permissions for Applications have not been granted; not asking again"),
+                Err(e) => log::warn!("Could not add the permissions for Applications: {e}"),
+            }
+        });
+    }
+
+    /// Saves `added` to the Scopes setting, once the sign-in has them.
+    fn save_scopes(&mut self, added: &[String]) {
+        self.settings.scopes = format!("{} {}", self.settings.scopes.trim(), added.join(" "));
+        match self.settings.save() {
+            Ok(_) => log::info!("Added to the saved scopes: {}", added.join(" ")),
+            Err(e) => log::error!("Could not save the added scopes: {e}"),
+        }
+        self.status = "Permissions for Applications added".into();
+    }
+
+    fn offer_app_scopes(&mut self, missing: Vec<String>) {
+        self.settings.app_scopes_offered = true;
+        if let Err(e) = self.settings.save() {
+            log::error!("Could not save settings: {e}");
+        }
+        let text = format!(
+            "Changing applications needs more Microsoft Graph permissions than this sign-in has: {}.\n\n\
+             A Global Administrator or Privileged Role Administrator can approve them now by signing in \
+             and ticking \"Consent on behalf of your organization\". Until then you can view applications \
+             but not change them.\n\n\
+             Sign in to approve them now? You won't be asked again. An administrator can also grant them \
+             later on the app registration's API permissions page, and they are then added the next time \
+             you sign in.",
+            missing.join(", ")
+        );
+        self.push(Dialog::confirm("Permissions for Applications", &text, move |app| app.approve_scopes(missing)));
+    }
+
+    /// A device code sign-in asking for `extra` scopes as well, for an administrator to approve them.
+    /// The sign-in so far is kept if it fails or is cancelled.
+    fn approve_scopes(&mut self, extra: Vec<String>) {
+        self.approval_gen += 1;
+        let (attempt, session) = (self.approval_gen, self.signin_gen);
+        let current = move |app: &App| attempt == app.approval_gen && session == app.signin_gen;
+        let ask = extra.clone();
+        self.status = "Requesting sign-in code…".into();
+        self.spawn_auth(move |a| a.start_device_code(&ask), move |app, r| {
+            if !current(app) {
+                return;
+            }
+            let dc = match r {
+                Ok(dc) => dc,
+                Err(e) => return app.error("Approve permissions", e),
+            };
+            let id = app.push(Dialog::DeviceCode {
+                message: dc.message.clone(),
+                uri: dc.verification_uri.clone(),
+                code: dc.user_code.clone(),
+                approval: true,
+            });
+            app.status = "Waiting for approval in your browser…".into();
+            app.spawn_auth(
+                move |a| a.poll_device_code(&dc),
+                move |app, r| {
+                    app.close_dialog(id);
+                    if !current(app) {
+                        return;
+                    }
+                    match r {
+                        Ok(()) => {
+                            if let Some(g) = &app.graph {
+                                g.auth.add_scopes(&extra);
+                            }
+                            app.save_scopes(&extra);
+                            // An administrator other than the person signed in may have approved them.
+                            app.spawn("Loading profile…", |g| g.get("/me?$select=displayName,userPrincipalName"), |app, r| {
+                                match r {
+                                    Ok(me) => app.signed_in_as(me),
+                                    Err(e) => app.error("Sign in", e),
+                                }
+                            });
+                        }
+                        Err(e) => app.error(
+                            "Approve permissions",
+                            format!("The permissions for Applications were not added, and you are still signed in as before.\n\n{e}"),
+                        ),
+                    }
+                },
+            );
+        });
+    }
+
+    pub fn cancel_approval(&mut self) {
+        self.approval_gen += 1;
+        self.status = "Permissions for Applications not added".into();
+    }
+
     fn signed_in_as(&mut self, me: Value) {
         self.signed_in = true;
         self.account = me["userPrincipalName"].as_str().unwrap_or("").to_string();
@@ -354,6 +468,7 @@ impl App {
         if self.node.endpoint().is_some() {
             self.refresh();
         }
+        self.add_app_scopes();
     }
 
     pub fn sign_out(&mut self) {
@@ -411,6 +526,7 @@ impl App {
                 app.loading.remove(&node);
                 match r {
                     Ok((mut rows, truncated)) => {
+                        rows.retain(|v| node.keep(v));
                         let first = node.columns()[0].get;
                         rows.sort_by_cached_key(|v| first(v).to_lowercase());
                         let noun = node.title().to_lowercase();
@@ -1206,6 +1322,7 @@ fn child_rows(node: Node) -> Vec<Value> {
         Node::Users => "Create, edit, enable/disable and delete user accounts; reset passwords",
         Node::Groups => "Manage groups, membership, owners, licences and directory role assignments",
         Node::Devices => "View, enable/disable and delete registered devices",
+        Node::Applications => "Manage connected applications, who can use them and the permissions granted to them",
         Node::Licences => "View subscriptions and assign or remove licences",
         _ => "",
     };

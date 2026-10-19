@@ -1,10 +1,10 @@
-//! Tabbed property sheets for users, groups, devices and licences.
+//! Tabbed property sheets for users, groups, devices, applications and licences.
 
 use crate::app::App;
 use crate::dialogs::{Dialog, Field, Form};
 use crate::graph::Graph;
 use crate::model::{self, general_fields, s, sku_name, Node};
-use crate::ops::collection;
+use crate::ops::{collection, DEFAULT_ACCESS_ROLE};
 use crate::app::Bold;
 use eframe::egui::{self, Align, Key, Layout, Modifiers, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
@@ -23,6 +23,8 @@ pub enum TabKind {
     RegisteredUsers,
     ServicePlans,
     LicensedUsers,
+    AppUsers,
+    Permissions,
 }
 
 impl TabKind {
@@ -38,6 +40,8 @@ impl TabKind {
             TabKind::RegisteredUsers => "Registered users",
             TabKind::ServicePlans => "Service plans",
             TabKind::LicensedUsers => "Licensed users",
+            TabKind::AppUsers => "Users and groups",
+            TabKind::Permissions => "Permissions",
         }
     }
 }
@@ -48,6 +52,7 @@ fn tabs_for(node: Node) -> Vec<TabKind> {
         Node::Users => vec![General, MemberOf, UserLicences, Roles],
         Node::Groups => vec![General, Members, Owners, Roles, GroupLicences],
         Node::Devices => vec![General, RegisteredOwners, RegisteredUsers, MemberOf],
+        Node::Applications => vec![General, AppUsers, Owners, Permissions],
         Node::Licences => vec![General, ServicePlans, LicensedUsers],
         Node::Root => vec![General],
     }
@@ -105,14 +110,16 @@ impl Sheet {
     /// Labels for the add / remove / edit operations available on a tab.
     fn op_labels(&self, kind: TabKind) -> [Option<&'static str>; 3] {
         use TabKind::*;
-        let editable = matches!(self.node, Node::Users | Node::Groups);
+        let editable = matches!(self.node, Node::Users | Node::Groups | Node::Applications);
         match (self.node, kind) {
             (_, General) if editable => [None, None, Some("Edit…")],
             (Node::Users, MemberOf) => [Some("Add to group…"), Some("Remove from group"), None],
             (Node::Users, UserLicences) | (Node::Groups, GroupLicences) => [Some("Assign licence…"), Some("Remove licence"), None],
             (_, Roles) => [Some("Assign role…"), Some("Remove assignment"), None],
             (_, Members) => [Some("Add member…"), Some("Remove member"), None],
-            (Node::Groups, Owners) => [Some("Add owner…"), Some("Remove owner"), None],
+            (Node::Groups | Node::Applications, Owners) => [Some("Add owner…"), Some("Remove owner"), None],
+            (_, AppUsers) => [Some("Assign user or group…"), Some("Remove assignment"), None],
+            (_, Permissions) => [None, Some("Revoke permission"), None],
             (_, LicensedUsers) => [Some("Assign to user…"), Some("Remove from user"), None],
             _ => [None, None, None],
         }
@@ -132,6 +139,7 @@ fn odata_kind(v: &Value) -> String {
         "device" => "Device",
         "directoryRole" => "Directory role",
         "orgContact" => "Contact",
+        "servicePrincipal" => "Application",
         other => other,
     }
     .to_string()
@@ -178,6 +186,10 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
                     "id,displayName,givenName,surname,userPrincipalName,mail,jobTitle,department,companyName,officeLocation,mobilePhone,businessPhones,usageLocation,accountEnabled,userType,createdDateTime,lastPasswordChangeDateTime,onPremisesSyncEnabled,employeeId",
                     &[("Display name", "displayName"), ("First name", "givenName"), ("Last name", "surname"), ("User principal name", "userPrincipalName"), ("Email", "mail"), ("Job title", "jobTitle"), ("Department", "department"), ("Company", "companyName"), ("Office", "officeLocation"), ("Mobile phone", "mobilePhone"), ("Business phones", "businessPhones"), ("Usage location", "usageLocation"), ("Employee ID", "employeeId"), ("Account enabled", "accountEnabled"), ("User type", "userType"), ("Synced from on-premises", "onPremisesSyncEnabled"), ("Created", "createdDateTime"), ("Password last changed", "lastPasswordChangeDateTime"), ("Object ID", "id")],
                 ),
+                Node::Applications => (
+                    "id,appId,displayName,publisherName,accountEnabled,appRoleAssignmentRequired,tags,appRoles,homepage,loginUrl,replyUrls,notes,signInAudience,preferredSingleSignOnMode",
+                    &[("Name", "displayName"), ("Publisher", "publisherName"), ("Enabled for users to sign in", "accountEnabled"), ("Assignment required", "appRoleAssignmentRequired"), ("Homepage", "homepage"), ("Sign-on URL", "loginUrl"), ("Reply URLs", "replyUrls"), ("Single sign-on mode", "preferredSingleSignOnMode"), ("Sign-in audience", "signInAudience"), ("Notes", "notes"), ("Application ID", "appId"), ("Object ID", "id")],
+                ),
                 Node::Groups => (
                     "id,displayName,description,mail,mailNickname,mailEnabled,securityEnabled,groupTypes,isAssignableToRole,membershipRule,membershipRuleProcessingState,visibility,createdDateTime,onPremisesSyncEnabled,assignedLicenses",
                     &[("Name", "displayName"), ("Description", "description"), ("Email", "mail"), ("Mail nickname", "mailNickname"), ("Security enabled", "securityEnabled"), ("Mail enabled", "mailEnabled"), ("Group types", "groupTypes"), ("Role-assignable", "isAssignableToRole"), ("Membership rule", "membershipRule"), ("Rule processing", "membershipRuleProcessingState"), ("Visibility", "visibility"), ("Synced from on-premises", "onPremisesSyncEnabled"), ("Created", "createdDateTime"), ("Object ID", "id")],
@@ -191,6 +203,9 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
             let mut fields = general_fields(&fresh, keys);
             if node == Node::Devices {
                 fields[3].1 = model::join_type(&fields[3].1).to_string();
+            }
+            if node == Node::Applications {
+                fields.insert(4, ("Visible to users".into(), model::yes_no(&model::visible_to_users(&fresh))));
             }
             return Ok((TabBody::Fields(fields), Some(fresh)));
         }
@@ -249,9 +264,70 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
                 vec![s(v, "displayName"), s(v, "userPrincipalName"), model::yes_no(&v["accountEnabled"])]
             })
         }
+        (_, AppUsers) => {
+            let roles: std::collections::HashMap<String, String> = obj["appRoles"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .map(|r| (s(r, "id"), s(r, "displayName")))
+                .collect();
+            let items = g.list(&format!("/servicePrincipals/{id}/appRoleAssignedTo?$top=999"))?;
+            table(vec!["Name", "Type", "Role"], items, |v| {
+                let role = s(v, "appRoleId");
+                let role = match roles.get(&role) {
+                    Some(name) => name.clone(),
+                    None if role == DEFAULT_ACCESS_ROLE => "Default access".into(),
+                    None => role,
+                };
+                vec![s(v, "principalDisplayName"), s(v, "principalType"), role]
+            })
+        }
+        (_, Permissions) => load_permissions(g, &id)?,
         _ => TabBody::Fields(Vec::new()),
     };
     Ok((body, None))
+}
+
+/// The application and delegated permissions granted to a service principal. Each row's data
+/// gets `kind` ("application" or "delegated") and the shown cells, for revoking it.
+fn load_permissions(g: &Graph, id: &str) -> anyhow::Result<TabBody> {
+    let mut cache: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    // A lookup that fails (for example, an API since deleted) shows the ID instead.
+    let mut lookup = |path: String| cache.entry(path.clone()).or_insert_with(|| g.get(&path).unwrap_or(Value::Null)).clone();
+    let mut rows = Vec::new();
+    for mut a in g.list(&format!("/servicePrincipals/{id}/appRoleAssignments"))? {
+        let api = lookup(format!("/servicePrincipals/{}?$select=displayName,appRoles", s(&a, "resourceId")));
+        let role = s(&a, "appRoleId");
+        let perm = api["appRoles"]
+            .as_array()
+            .and_then(|roles| roles.iter().find(|r| r["id"] == role.as_str()))
+            .map(|r| s(r, "value"))
+            .unwrap_or(role);
+        let cells = vec![s(&a, "resourceDisplayName"), perm, "Application".into(), "Admin consent".into()];
+        a["kind"] = json!("application");
+        rows.push(SheetRow { cells, data: a });
+    }
+    for mut grant in g.list(&format!("/oauth2PermissionGrants?$filter=clientId eq '{id}'"))? {
+        let resource = s(&grant, "resourceId");
+        let api = lookup(format!("/servicePrincipals/{resource}?$select=displayName,appRoles"));
+        let api = if api.is_null() { resource } else { s(&api, "displayName") };
+        let scopes = s(&grant, "scope").split_whitespace().collect::<Vec<_>>().join(", ");
+        let granted_for = if grant["consentType"] == "AllPrincipals" {
+            "All users (admin consent)".to_string()
+        } else {
+            let user = s(&grant, "principalId");
+            match lookup(format!("/users/{user}?$select=displayName")) {
+                Value::Null => user,
+                u => s(&u, "displayName"),
+            }
+        };
+        let cells = vec![api, scopes, "Delegated".into(), granted_for];
+        grant["kind"] = json!("delegated");
+        rows.push(SheetRow { cells, data: grant });
+    }
+    rows.sort_by_cached_key(|r| (r.cells[0].to_lowercase(), r.cells[2].clone(), r.cells[1].to_lowercase()));
+    Ok(TabBody::Table { headers: vec!["API", "Permissions", "Type", "Granted for"], rows })
 }
 
 impl App {
@@ -496,9 +572,9 @@ impl App {
         let node = sheet.node;
         let labels = sheet.op_labels(kind);
         let tab = &mut sheet.tabs[sheet.active];
-        let row: Option<Value> = match (&tab.body, tab.sel) {
-            (TabBody::Table { rows, .. }, Some(i)) => rows.get(i).map(|r| r.data.clone()),
-            _ => None,
+        let (row, cells): (Option<Value>, Vec<String>) = match (&tab.body, tab.sel) {
+            (TabBody::Table { rows, .. }, Some(i)) => rows.get(i).map(|r| (Some(r.data.clone()), r.cells.clone())).unwrap_or_default(),
+            _ => (None, Vec::new()),
         };
         if op == TabOp::Reload {
             tab.requested = false;
@@ -513,6 +589,7 @@ impl App {
             TabOp::Add if labels[0].is_some() => match kind {
                 MemberOf => self.pick_group(&format!("Add {name} to group"), move |app, g| app.add_member(&g.id, &id, reload)),
                 Members => self.pick_principal(&format!("Add member to {name}"), move |app, m| app.add_member(&id, &m.id, reload)),
+                AppUsers => self.assign_app(obj, reload),
                 Owners => {
                     let coll = collection(node);
                     self.pick_user(&format!("Add owner to {name}"), move |app, u| app.add_owner(coll, &id, &u.id, reload));
@@ -567,6 +644,28 @@ impl App {
                         let body = json!({ "addLicenses": [], "removeLicenses": [sku] });
                         (format!("Remove this licence from {name}?"), Box::new(move |g| g.post(&path, &body).map(|_| ())))
                     }
+                    AppUsers => {
+                        let path = format!("/servicePrincipals/{id}/appRoleAssignedTo/{rid}");
+                        (format!("Remove '{}' from {name}?", s(&row, "principalDisplayName")), Box::new(move |g| g.delete(&path)))
+                    }
+                    Permissions => {
+                        let (what, path) = if row["kind"] == "application" {
+                            let what = format!(
+                                "Revoke the application permission {} on {} from {name}? It will no longer be able to use it without signing in as a user.",
+                                cells[1], cells[0]
+                            );
+                            (what, format!("/servicePrincipals/{id}/appRoleAssignments/{rid}"))
+                        } else {
+                            let who = if row["consentType"] == "AllPrincipals" { "all users" } else { cells[3].as_str() };
+                            let what = format!(
+                                "Revoke the delegated permissions on {} granted to {name} for {who}? This revokes all of them: {}. \
+                                 Users may be asked to consent again the next time they sign in.",
+                                cells[0], cells[1]
+                            );
+                            (what, format!("/oauth2PermissionGrants/{rid}"))
+                        };
+                        (what, Box::new(move |g| g.delete(&path)))
+                    }
                     LicensedUsers => {
                         let path = format!("/users/{rid}/assignLicense");
                         let body = json!({ "addLicenses": [], "removeLicenses": [s(&obj, "skuId")] });
@@ -615,6 +714,7 @@ impl App {
             Node::Groups => Form::new(&format!("Edit {}", s(&obj, "displayName")), "Save")
                 .field(Field::text("displayName", "Name", &s(&obj, "displayName")).required())
                 .field(Field::multiline("description", "Description", &s(&obj, "description"))),
+            Node::Applications => return self.edit_application(sheet_id, obj),
             _ => return,
         };
         let form = form.on_submit(move |app, f| {
@@ -649,6 +749,51 @@ impl App {
             });
             Ok(())
         });
+        self.push(Dialog::Form(form));
+    }
+
+    fn edit_application(&mut self, sheet_id: u64, obj: Value) {
+        let id = s(&obj, "id");
+        let visible = model::visible_to_users(&obj) != false;
+        let form = Form::new(&format!("Edit {}", s(&obj, "displayName")), "Save")
+            .field(Field::check("accountEnabled", "Enabled for users to sign in", obj["accountEnabled"] != false))
+            .field(Field::check("appRoleAssignmentRequired", "Assignment required", obj["appRoleAssignmentRequired"] == true))
+            .field(Field::check("visible", "Visible to users", visible))
+            .field(Field::multiline("notes", "Notes", &s(&obj, "notes")))
+            .intro(
+                "When assignment is required, only the users and groups on the Users and groups tab can sign in. \
+                 Applications that are not visible are left out of My Apps and the Microsoft 365 app launcher.",
+            )
+            .on_submit(move |app, f| {
+                let mut body = json!({});
+                for key in ["accountEnabled", "appRoleAssignmentRequired"] {
+                    if f.checked(key) != (obj[key] == true) {
+                        body[key] = json!(f.checked(key));
+                    }
+                }
+                if f.checked("visible") != visible {
+                    let mut tags: Vec<Value> = obj["tags"].as_array().cloned().unwrap_or_default();
+                    tags.retain(|t| t != model::HIDE_APP_TAG);
+                    if !f.checked("visible") {
+                        tags.push(json!(model::HIDE_APP_TAG));
+                    }
+                    body["tags"] = json!(tags);
+                }
+                let notes = f.text("notes");
+                if notes != s(&obj, "notes") {
+                    body["notes"] = if notes.is_empty() { Value::Null } else { json!(notes) };
+                }
+                let path = format!("/servicePrincipals/{id}");
+                let patch = body.clone();
+                let oid = id.clone();
+                app.mutate("Save changes", move |g| g.patch(&path, &patch), move |app| {
+                    let mut updated = body;
+                    updated["id"] = json!(oid);
+                    app.upsert(Node::Applications, updated);
+                    app.reload_tab(sheet_id, TabKind::General);
+                });
+                Ok(())
+            });
         self.push(Dialog::Form(form));
     }
 }

@@ -9,7 +9,23 @@ use std::path::PathBuf;
 
 pub const DEFAULT_SCOPES: &str = "User.ReadWrite.All Group.ReadWrite.All Device.ReadWrite.All \
 Directory.Read.All RoleManagement.ReadWrite.Directory Organization.Read.All \
-LicenseAssignment.ReadWrite.All User-PasswordProfile.ReadWrite.All";
+LicenseAssignment.ReadWrite.All User-PasswordProfile.ReadWrite.All Application.ReadWrite.All \
+AppRoleAssignment.ReadWrite.All DelegatedPermissionGrant.ReadWrite.All";
+
+/// Scopes added in 1.2.0 for the Applications node. A saved `scopes` setting without them gets
+/// them after signing in, once they are granted (see `App::add_app_scopes`).
+pub const APP_SCOPES: [&str; 3] =
+    ["Application.ReadWrite.All", "AppRoleAssignment.ReadWrite.All", "DelegatedPermissionGrant.ReadWrite.All"];
+
+/// The scopes in `wanted` missing from the space-separated `scopes`, which may name them in full
+/// (`https://graph.microsoft.com/User.Read`) or not, in any case.
+pub fn missing_scopes(scopes: &str, wanted: &[&str]) -> Vec<String> {
+    let have: Vec<String> = scopes
+        .split_whitespace()
+        .map(|s| s.rsplit('/').next().unwrap_or(s).to_ascii_lowercase())
+        .collect();
+    wanted.iter().filter(|w| !have.contains(&w.to_ascii_lowercase())).map(|w| w.to_string()).collect()
+}
 
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -18,6 +34,8 @@ pub struct Settings {
     /// Keep the refresh token on disk between runs.
     pub remember_sign_in: bool,
     pub scopes: String,
+    /// The administrator has been asked to approve [`APP_SCOPES`], so they are not asked again.
+    pub app_scopes_offered: bool,
     pub authority_host: String,
     pub graph_endpoint: String,
     /// off, error, warn, info, debug or trace.
@@ -37,6 +55,7 @@ impl Default for Settings {
             client_id: String::new(),
             remember_sign_in: false,
             scopes: DEFAULT_SCOPES.to_string(),
+            app_scopes_offered: false,
             authority_host: "https://login.microsoftonline.com".to_string(),
             graph_endpoint: "https://graph.microsoft.com".to_string(),
             log_level: "debug".to_string(),
@@ -91,6 +110,9 @@ impl Settings {
         if let Some(v) = get("auth", "scopes").filter(|v| !v.is_empty()) {
             s.scopes = v;
         }
+        if let Some(v) = get("auth", "app_scopes_offered") {
+            s.app_scopes_offered = matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "1");
+        }
         if let Some(v) = get("cloud", "authority_host").filter(|v| !v.is_empty()) {
             s.authority_host = v.trim_end_matches('/').to_string();
         }
@@ -131,6 +153,8 @@ impl Settings {
              remember_sign_in = {}\n\
              ; Space-separated delegated Microsoft Graph permissions to request.\n\
              scopes = {}\n\
+             ; Set once you have been asked to approve the permissions for Applications.\n\
+             app_scopes_offered = {}\n\
              \n\
              [cloud]\n\
              authority_host = {}\n\
@@ -151,6 +175,7 @@ impl Settings {
             self.client_id.trim(),
             self.remember_sign_in,
             self.scopes.trim(),
+            self.app_scopes_offered,
             self.authority_host,
             self.graph_endpoint,
             self.log_level.trim(),
@@ -193,5 +218,12 @@ mod tests {
         assert_eq!(ini[&("auth".into(), "tenant_id".into())], "abc");
         assert_eq!(ini[&("auth".into(), "client_id".into())], "def");
         assert_eq!(ini[&("cloud".into(), "x".into())], "1");
+    }
+
+    #[test]
+    fn finds_missing_scopes() {
+        assert!(missing_scopes(DEFAULT_SCOPES, &APP_SCOPES).is_empty());
+        let old = "User.ReadWrite.All https://graph.microsoft.com/application.readwrite.all";
+        assert_eq!(missing_scopes(old, &APP_SCOPES), ["AppRoleAssignment.ReadWrite.All", "DelegatedPermissionGrant.ReadWrite.All"]);
     }
 }

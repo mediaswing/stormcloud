@@ -59,7 +59,7 @@ pub fn node_actions(node: Node) -> Vec<Act> {
     match node {
         Node::Users => vec![Act::New, Act::ImportUsers, Act::ExportList, Act::ExportDatabase, Act::Refresh],
         Node::Groups => vec![Act::New, Act::ExportList, Act::ExportDatabase, Act::Refresh],
-        Node::Devices | Node::Licences => vec![Act::ExportList, Act::ExportDatabase, Act::Refresh],
+        Node::Devices | Node::Applications | Node::Licences => vec![Act::ExportList, Act::ExportDatabase, Act::Refresh],
         Node::Root => vec![],
     }
 }
@@ -72,6 +72,7 @@ pub fn item_actions(node: Node) -> Vec<Act> {
         Node::Users => vec![Properties, ToggleEnabled, ResetPassword, AssignLicence, AddToGroup, AssignRole, Delete],
         Node::Groups => vec![Properties, AddMember, ImportMembers, AssignRole, AssignLicence, Delete],
         Node::Devices => vec![Properties, ToggleEnabled, Delete],
+        Node::Applications => vec![Properties, ToggleEnabled, AssignToUser, Delete],
         Node::Licences => vec![Properties, AssignToUser],
     }
 }
@@ -82,6 +83,7 @@ pub fn collection(node: Node) -> &'static str {
         Node::Users => "users",
         Node::Groups => "groups",
         Node::Devices => "devices",
+        Node::Applications => "servicePrincipals",
         Node::Licences => "subscribedSkus",
         Node::Root => "",
     }
@@ -103,6 +105,8 @@ impl App {
             Act::ToggleEnabled => match (self.node, enabled) {
                 (Node::Users, true) => "Disable account",
                 (Node::Users, false) => "Enable account",
+                (Node::Applications, true) => "Disable sign-in",
+                (Node::Applications, false) => "Enable sign-in",
                 (_, true) => "Disable",
                 (_, false) => "Enable",
             }
@@ -112,6 +116,7 @@ impl App {
             Act::AddToGroup => "Add to group…".into(),
             Act::AddMember => "Add member…".into(),
             Act::AssignRole => "Assign directory role…".into(),
+            Act::AssignToUser if self.node == Node::Applications => "Assign users and groups…".into(),
             Act::AssignToUser => "Assign to user…".into(),
             Act::Delete => "Delete".into(),
             Act::ExportList => "Export list…".into(),
@@ -170,6 +175,7 @@ impl App {
                     app.assign_role(&id, &role.id, |_| {});
                 });
             }
+            Act::AssignToUser if node == Node::Applications => self.assign_app(obj, |_| {}),
             Act::AssignToUser => {
                 let sku = s(&obj, "skuId");
                 self.pick_user(&format!("Assign {name} to user"), move |app, u| {
@@ -376,6 +382,7 @@ impl App {
         } else {
             let what = match node {
                 Node::Users => "The user will be unable to sign in.",
+                Node::Applications => "No one will be able to sign in to it, and it will be unable to get tokens.",
                 _ => "The device will be unable to authenticate with Microsoft Entra ID.",
             };
             let text = format!("Disable {} '{}'? {what}", node.noun(), node.object_name(&obj));
@@ -388,6 +395,8 @@ impl App {
             Node::Users => "Deleted users can be restored for 30 days.",
             Node::Groups => "Microsoft 365 groups can be restored for 30 days; security groups are deleted permanently.",
             Node::Devices => "This cannot be undone.",
+            Node::Applications => "It is removed from the tenant with its user and group assignments and the \
+                                   permissions granted to it, so no one will be able to sign in to it.",
             _ => "",
         };
         let text = format!("Are you sure you want to delete the {} '{name}'? {note}", node.noun());
@@ -483,6 +492,30 @@ impl App {
         self.mutate(label, move |g| g.post(&path, &body).map(|_| ()), after);
     }
 
+    /// Assigns a user or group to an application, asking which app role to give them if the
+    /// application has more than one.
+    pub fn assign_app(&mut self, sp: Value, after: impl FnOnce(&mut App) + Send + 'static) {
+        let sp_id = s(&sp, "id");
+        let name = s(&sp, "displayName");
+        let roles = app_roles(&sp);
+        self.pick_user_or_group(&format!("Assign user or group to {name}"), move |app, who| {
+            let assign = move |app: &mut App, role_id: String| {
+                let path = format!("/servicePrincipals/{sp_id}/appRoleAssignedTo");
+                let body = json!({ "principalId": who.id, "resourceId": sp_id, "appRoleId": role_id });
+                app.mutate("Assign to application", move |g| g.post(&path, &body).map(|_| ()), after);
+            };
+            match roles.len() {
+                0 => assign(app, DEFAULT_ACCESS_ROLE.into()),
+                1 => assign(app, roles[0].id.clone()),
+                _ => {
+                    let title = format!("Role for {}", who.label.trim_start_matches(['👤', '👥', ' ']));
+                    let fetch = move |_: &Graph, _: &str| Ok(roles.clone());
+                    app.push(Dialog::Picker(Picker::new(&title, "Role:", false, fetch, move |app, role| assign(app, role.id))));
+                }
+            }
+        });
+    }
+
     // ----- pickers -------------------------------------------------------
 
     pub fn pick_user(&mut self, title: &str, on_pick: impl FnOnce(&mut App, PickItem) + 'static) {
@@ -491,6 +524,15 @@ impl App {
 
     pub fn pick_group(&mut self, title: &str, on_pick: impl FnOnce(&mut App, PickItem) + 'static) {
         self.push(Dialog::Picker(Picker::new(title, "Group name:", true, search_groups, on_pick)));
+    }
+
+    pub fn pick_user_or_group(&mut self, title: &str, on_pick: impl FnOnce(&mut App, PickItem) + 'static) {
+        let fetch = |g: &Graph, q: &str| {
+            let mut items = search_users(g, q)?;
+            items.extend(search_groups(g, q)?);
+            Ok(items)
+        };
+        self.push(Dialog::Picker(Picker::new(title, "Search:", true, fetch, on_pick)));
     }
 
     /// Users, groups and devices (anything that can be a group member).
@@ -538,6 +580,23 @@ impl App {
         };
         self.push(Dialog::Picker(Picker::new(title, "Licence:", false, fetch, on_pick)));
     }
+}
+
+/// The app role an assignment gets when the application defines none, giving plain access.
+pub const DEFAULT_ACCESS_ROLE: &str = "00000000-0000-0000-0000-000000000000";
+
+/// The enabled app roles of a service principal that users and groups can be assigned.
+pub fn app_roles(sp: &Value) -> Vec<PickItem> {
+    let mut roles: Vec<PickItem> = sp["appRoles"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r["isEnabled"] != false && r["allowedMemberTypes"].as_array().is_some_and(|t| t.iter().any(|t| t == "User")))
+        .map(|r| PickItem { id: s(r, "id"), label: s(r, "displayName"), detail: s(r, "description") })
+        .collect();
+    roles.sort_by_key(|r| r.label.to_lowercase());
+    roles
 }
 
 fn search_users(g: &Graph, q: &str) -> anyhow::Result<Vec<PickItem>> {
@@ -661,6 +720,28 @@ mod tests {
             assert!(p.chars().any(|c| !c.is_ascii_alphanumeric()));
             assert!(p.starts_with(|c: char| c.is_ascii_alphanumeric()), "{p}");
         }
+    }
+
+    #[test]
+    fn app_roles_for_users_only() {
+        let sp = json!({ "appRoles": [
+            { "id": "1", "displayName": "Writer", "isEnabled": true, "allowedMemberTypes": ["User"] },
+            { "id": "2", "displayName": "Daemon", "isEnabled": true, "allowedMemberTypes": ["Application"] },
+            { "id": "3", "displayName": "Old", "isEnabled": false, "allowedMemberTypes": ["User"] },
+            { "id": "4", "displayName": "Admin", "isEnabled": true, "allowedMemberTypes": ["User", "Application"] },
+        ]});
+        let names: Vec<String> = app_roles(&sp).into_iter().map(|r| r.label).collect();
+        assert_eq!(names, ["Admin", "Writer"]);
+        assert!(app_roles(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn applications_leave_out_microsoft_and_managed_identities() {
+        let sp = |kind: &str, owner: &str| json!({ "servicePrincipalType": kind, "appOwnerOrganizationId": owner });
+        assert!(Node::Applications.keep(&sp("Application", "11111111-2222-3333-4444-555555555555")));
+        assert!(!Node::Applications.keep(&sp("Application", "f8cdef31-a31e-4b4a-93e4-5f571e91255a")));
+        assert!(!Node::Applications.keep(&sp("ManagedIdentity", "11111111-2222-3333-4444-555555555555")));
+        assert!(Node::Users.keep(&json!({})));
     }
 
     #[test]

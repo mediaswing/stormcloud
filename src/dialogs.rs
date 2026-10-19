@@ -27,7 +27,8 @@ pub enum Dialog {
     Picker(Picker),
     Sheet(Box<Sheet>),
     Bulk(Box<Bulk>),
-    DeviceCode { message: String, uri: String, code: String },
+    /// A device code sign-in; `approval` when it is only to approve more permissions.
+    DeviceCode { message: String, uri: String, code: String, approval: bool },
     ContextMenu,
     Help,
     About,
@@ -330,11 +331,12 @@ impl App {
             Dialog::Picker(p) => self.show_picker(ctx, modal, id, p, first, top, escape),
             Dialog::Sheet(sheet) => self.show_sheet(ctx, modal, id, sheet, first, top, escape),
             Dialog::Bulk(bulk) => self.show_bulk(ctx, modal, id, bulk, first, escape),
-            Dialog::DeviceCode { message, uri, code } => {
+            Dialog::DeviceCode { message, uri, code, approval } => {
+                let approval = *approval;
                 let mut close = escape;
                 modal.show(ctx, |ui| {
                     ui.set_max_width(520.0);
-                    ui.heading("Sign in to Microsoft Entra ID");
+                    ui.heading(if approval { "Approve permissions for Applications" } else { "Sign in to Microsoft Entra ID" });
                     ui.add_space(6.0);
                     ui.add(egui::Label::new(message.as_str()).wrap());
                     ui.add_space(8.0);
@@ -361,7 +363,9 @@ impl App {
                         ui.spinner();
                     });
                 });
-                if close {
+                if close && approval {
+                    self.cancel_approval();
+                } else if close {
                     self.cancel_sign_in();
                 }
                 !close
@@ -413,7 +417,7 @@ impl App {
                         (format!("{cmd}L"), "Assign a licence"),
                         (format!("{cmd}G / {cmd}M"), "Add to group / add member"),
                         (format!("{cmd}R"), "Assign a directory role"),
-                        (format!("{cmd}U"), "Assign the selected licence to a user"),
+                        (format!("{cmd}U"), "Assign the selected licence to a user, or a user or group to the selected application"),
                         ("Ctrl+Tab / Ctrl+Shift+Tab".into(), "Next / previous tab in a properties sheet"),
                         ("Insert, Delete, F2".into(), "Add, remove, edit on a properties tab"),
                         (format!("{cmd}, (comma)"), "Settings"),
