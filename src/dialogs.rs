@@ -7,6 +7,7 @@ use crate::ops::item_actions;
 use crate::sheets::Sheet;
 use crate::app::Bold;
 use eframe::egui::{self, Align, Key, Layout, Modifiers, RichText};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,7 +29,7 @@ pub enum Dialog {
     Sheet(Box<Sheet>),
     Bulk(Box<Bulk>),
     /// A device code sign-in; `approval` when it is only to approve more permissions.
-    DeviceCode { message: String, uri: String, code: String, approval: bool },
+    DeviceCode { message: String, uri: String, code: String, approval: bool, cancelled: Arc<AtomicBool> },
     ContextMenu,
     Help,
     About,
@@ -332,7 +333,7 @@ impl App {
             Dialog::Picker(p) => self.show_picker(ctx, modal, id, p, first, top, escape),
             Dialog::Sheet(sheet) => self.show_sheet(ctx, modal, id, sheet, first, top, escape),
             Dialog::Bulk(bulk) => self.show_bulk(ctx, modal, id, bulk, first, escape),
-            Dialog::DeviceCode { message, uri, code, approval } => {
+            Dialog::DeviceCode { message, uri, code, approval, cancelled } => {
                 let approval = *approval;
                 let mut close = escape;
                 modal.show(ctx, |ui| {
@@ -364,6 +365,10 @@ impl App {
                         ui.spinner();
                     });
                 });
+                if close {
+                    // Stops the poll, so a sign-in finished in the browser later isn't used.
+                    cancelled.store(true, Ordering::SeqCst);
+                }
                 if close && approval {
                     self.cancel_approval();
                 } else if close {

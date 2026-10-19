@@ -322,7 +322,19 @@ fn load_permissions(g: &Graph, id: &str) -> anyhow::Result<TabBody> {
         a["kind"] = json!("application");
         rows.push(SheetRow { cells, data: a });
     }
-    for mut grant in g.list(&format!("/oauth2PermissionGrants?$filter=clientId eq '{id}'"))? {
+    let grants = g.list(&format!("/oauth2PermissionGrants?$filter=clientId eq '{id}'"))?;
+    // Names of the users who consented for themselves, fetched together rather than one by one.
+    let mut user_ids: Vec<String> = grants.iter().filter(|g| g["consentType"] != "AllPrincipals").map(|g| s(g, "principalId")).collect();
+    user_ids.sort();
+    user_ids.dedup();
+    let mut user_names = std::collections::HashMap::new();
+    for chunk in user_ids.chunks(1000) {
+        let found = g.post("/directoryObjects/getByIds", &json!({ "ids": chunk, "types": ["user"] }))?;
+        for u in found["value"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            user_names.insert(s(u, "id"), s(u, "displayName"));
+        }
+    }
+    for mut grant in grants {
         let resource = s(&grant, "resourceId");
         let api = lookup(format!("/servicePrincipals/{resource}?$select=displayName,appRoles"));
         let api = if api.is_null() { resource } else { s(&api, "displayName") };
@@ -330,11 +342,9 @@ fn load_permissions(g: &Graph, id: &str) -> anyhow::Result<TabBody> {
         let granted_for = if grant["consentType"] == "AllPrincipals" {
             "All users (admin consent)".to_string()
         } else {
+            // A user since deleted shows as their ID.
             let user = s(&grant, "principalId");
-            match lookup(format!("/users/{user}?$select=displayName")) {
-                Value::Null => user,
-                u => s(&u, "displayName"),
-            }
+            user_names.get(&user).cloned().unwrap_or(user)
         };
         let cells = vec![api, scopes, "Delegated".into(), granted_for];
         grant["kind"] = json!("delegated");
@@ -781,9 +791,11 @@ impl App {
     fn edit_application(&mut self, sheet_id: u64, obj: Value) {
         let id = s(&obj, "id");
         let visible = model::visible_to_users(&obj) != false;
+        // A missing value shows as the default, and only counts as changed if the box is.
+        let was = [("accountEnabled", obj["accountEnabled"] != false), ("appRoleAssignmentRequired", obj["appRoleAssignmentRequired"] == true)];
         let form = Form::new(&format!("Edit {}", s(&obj, "displayName")), "Save")
-            .field(Field::check("accountEnabled", "Enabled for users to sign in", obj["accountEnabled"] != false))
-            .field(Field::check("appRoleAssignmentRequired", "Assignment required", obj["appRoleAssignmentRequired"] == true))
+            .field(Field::check("accountEnabled", "Enabled for users to sign in", was[0].1))
+            .field(Field::check("appRoleAssignmentRequired", "Assignment required", was[1].1))
             .field(Field::check("visible", "Visible to users", visible))
             .field(Field::multiline("notes", "Notes", &s(&obj, "notes")))
             .intro(
@@ -792,8 +804,8 @@ impl App {
             )
             .on_submit(move |app, f| {
                 let mut body = json!({});
-                for key in ["accountEnabled", "appRoleAssignmentRequired"] {
-                    if f.checked(key) != (obj[key] == true) {
+                for (key, before) in was {
+                    if f.checked(key) != before {
                         body[key] = json!(f.checked(key));
                     }
                 }

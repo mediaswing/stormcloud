@@ -68,6 +68,9 @@ impl App {
             let current = env!("CARGO_PKG_VERSION");
             match r {
                 Ok(release) if is_newer(&release.version, current) => {
+                    if manual {
+                        app.status = "Ready".into();
+                    }
                     log::info!("Version {} is available (running {current})", release.version);
                     if manual || release.version != app.settings.skipped_version {
                         app.push(Dialog::Update(release));

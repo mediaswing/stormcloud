@@ -527,6 +527,15 @@ impl App {
         let sp_id = s(&sp, "id");
         let name = s(&sp, "displayName");
         let roles = app_roles(&sp);
+        // Default access is only for applications that define no app roles of their own.
+        let own_roles = sp["appRoles"].as_array().is_some_and(|r| r.iter().any(|r| r["isEnabled"] != false));
+        if roles.is_empty() && own_roles {
+            self.push(Dialog::message(
+                "Assign users and groups",
+                &format!("{name} has app roles, but none that can be given to users or groups, so they can't be assigned to it."),
+            ));
+            return;
+        }
         self.pick_user_or_group(&format!("Assign user or group to {name}"), move |app, who| {
             let assign = move |app: &mut App, role_id: String| {
                 let path = format!("/servicePrincipals/{sp_id}/appRoleAssignedTo");

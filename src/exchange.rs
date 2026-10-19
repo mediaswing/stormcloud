@@ -185,6 +185,16 @@ fn html_text(html: &str) -> String {
             out.push('\n');
         }
         rest = &rest[i + j + 1..];
+        // Outlook on the web puts a <style> block in replies; its text isn't part of the message.
+        for hidden in ["style", "head", "script"] {
+            if tag.split([' ', '/']).next() == Some(hidden) {
+                let end = format!("</{hidden}");
+                rest = match rest.to_ascii_lowercase().find(&end) {
+                    Some(k) => &rest[k..],
+                    None => "",
+                };
+            }
+        }
     }
     if !rest.contains('<') {
         out.push_str(rest);
@@ -197,6 +207,12 @@ fn html_text(html: &str) -> String {
         .replace("&#39;", "'")
         .replace("&amp;", "&");
     out.trim().to_string()
+}
+
+/// HTML for a reply typed as plain text, keeping its line breaks.
+fn text_html(text: &str) -> String {
+    let escaped = text.trim().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    format!("<html><body>{}</body></html>", escaped.replace("\r\n", "\n").replace('\n', "<br>"))
 }
 
 fn is_system_account(who: &str) -> bool {
@@ -484,10 +500,10 @@ impl App {
                 });
                 // Unchanged messages are left alone, keeping any formatting they have.
                 if f.raw("internal").trim() != internal {
-                    params["InternalMessage"] = json!(f.raw("internal"));
+                    params["InternalMessage"] = json!(text_html(&f.raw("internal")));
                 }
                 if f.raw("external").trim() != external {
-                    params["ExternalMessage"] = json!(f.raw("external"));
+                    params["ExternalMessage"] = json!(text_html(&f.raw("external")));
                 }
                 if f.choice("state") == "Scheduled" {
                     let (Some(start), Some(end)) = (parse_time(&f.text("start")), parse_time(&f.text("end"))) else {
@@ -731,6 +747,16 @@ mod tests {
     fn strips_reply_html() {
         assert_eq!(html_text("<html><body><p>Away &amp; back</p><p>Monday</p></body></html>"), "Away & back\nMonday");
         assert_eq!(html_text("Plain text"), "Plain text");
+        let owa = "<html><head><style type=\"text/css\" style=\"display:none;\"> P {margin-top:0;} </style></head>\
+                   <body><div>Away</div><div>Back Monday</div></body></html>";
+        assert_eq!(html_text(owa), "Away\nBack Monday");
+    }
+
+    #[test]
+    fn typed_replies_keep_their_lines() {
+        let html = text_html("Away <until>\nBack Monday");
+        assert_eq!(html, "<html><body>Away &lt;until&gt;<br>Back Monday</body></html>");
+        assert_eq!(html_text(&html), "Away <until>\nBack Monday");
     }
 
     #[test]

@@ -5,7 +5,8 @@ use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -47,6 +48,9 @@ pub struct DeviceCode {
     /// The API the sign-in asks for scopes on.
     #[serde(skip)]
     pub api: Api,
+    /// Set when the sign-in is cancelled, to stop polling and keep its tokens if it completes.
+    #[serde(skip)]
+    pub cancelled: Arc<AtomicBool>,
 }
 
 #[derive(Deserialize)]
@@ -180,6 +184,10 @@ impl Auth {
         let deadline = Instant::now() + Duration::from_secs(dc.expires_in);
         loop {
             thread::sleep(interval);
+            if dc.cancelled.load(Ordering::SeqCst) {
+                log::info!("Device code sign-in cancelled");
+                bail!("The sign-in was cancelled.");
+            }
             if Instant::now() > deadline {
                 log::warn!("Device code expired before sign-in completed");
                 bail!("The sign-in code expired. Choose File > Sign in to try again.");
@@ -194,7 +202,15 @@ impl Auth {
                 ])
                 .send()?;
             if resp.status().is_success() {
-                self.store(dc.api, resp.json()?);
+                if dc.cancelled.load(Ordering::SeqCst) {
+                    log::info!("Device code sign-in completed after it was cancelled; not using it");
+                    bail!("The sign-in was cancelled.");
+                }
+                let tr = resp.json()?;
+                // Whoever signed in may not be who was signed in before, so access tokens for
+                // other APIs, from the old sign-in, must not be used with the new one.
+                self.tokens.lock().unwrap().access.clear();
+                self.store(dc.api, tr);
                 log::info!("Device code sign-in completed");
                 return Ok(());
             }
@@ -280,7 +296,7 @@ impl Auth {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().unwrap_or_default();
-            if sign_in_rejected(&text) || text.contains("consent_required") {
+            if text.contains("consent_required") || text.contains("AADSTS65001") {
                 log::info!("More scopes need consent: {text}");
                 return Ok(false);
             }

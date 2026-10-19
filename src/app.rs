@@ -325,6 +325,7 @@ impl App {
                 uri: dc.verification_uri.clone(),
                 code: dc.user_code.clone(),
                 approval: false,
+                cancelled: dc.cancelled.clone(),
             });
             app.status = "Waiting for sign-in in your browser…".into();
             app.spawn_auth(
@@ -443,6 +444,7 @@ impl App {
                 uri: dc.verification_uri.clone(),
                 code: dc.user_code.clone(),
                 approval: true,
+                cancelled: dc.cancelled.clone(),
             });
             app.status = "Waiting for approval in your browser…".into();
             app.spawn_auth(
