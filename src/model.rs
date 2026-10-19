@@ -31,10 +31,10 @@ pub const TREE: &[(Node, usize)] = &[
     (Node::Groups, 1),
     (Node::Devices, 1),
     (Node::Applications, 1),
+    (Node::Licences, 1),
     (Node::Exchange, 1),
     (Node::Mailboxes, 2),
     (Node::DistributionLists, 2),
-    (Node::Licences, 1),
 ];
 
 pub struct Column {
