@@ -40,21 +40,49 @@ pub struct GroupChoice {
 /// Whether a new user can be added to a group here, and whether copying memberships should tick
 /// it. Groups whose membership is set elsewhere can't; role-assignable groups grant directory
 /// roles, so they are only added when ticked by hand.
-pub fn classify_group(v: &Value) -> GroupChoice {
+/// Where a group's membership is managed, which decides whether the wizards can change it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Managed {
+    /// By its membership rule.
+    Dynamic,
+    /// In Active Directory.
+    Synced,
+    /// In Exchange Online: a distribution list or mail-enabled security group.
+    Exchange,
+    /// With Microsoft Graph.
+    Graph,
+}
+
+pub fn managed(v: &Value) -> Managed {
     let types = v["groupTypes"].as_array().cloned().unwrap_or_default();
-    let unified = types.iter().any(|t| t == "Unified");
-    let (allowed, preselect, mut note) = if types.iter().any(|t| t == "DynamicMembership") || !s(v, "membershipRule").is_empty() {
-        (false, false, "Dynamic membership: set by its rule".to_string())
+    if types.iter().any(|t| t == "DynamicMembership") || !s(v, "membershipRule").is_empty() {
+        Managed::Dynamic
     } else if v["onPremisesSyncEnabled"] == true {
-        (false, false, "Synced from Active Directory: change it there".into())
-    } else if v["mailEnabled"] == true && !unified {
-        (false, false, "Distribution list or mail-enabled security group: add the user in Exchange Online once they have a mailbox".into())
-    } else if v["isAssignableToRole"] == true {
-        (true, false, "Role-assignable: its members get directory roles, so it isn't ticked for you".into())
+        Managed::Synced
+    } else if v["mailEnabled"] == true && !types.iter().any(|t| t == "Unified") {
+        Managed::Exchange
     } else {
-        (true, true, String::new())
+        Managed::Graph
+    }
+}
+
+pub fn assigns_licences(v: &Value) -> bool {
+    v["assignedLicenses"].as_array().is_some_and(|a| !a.is_empty())
+}
+
+pub fn classify_group(v: &Value) -> GroupChoice {
+    let (allowed, preselect, mut note) = match managed(v) {
+        Managed::Dynamic => (false, false, "Dynamic membership: set by its rule".to_string()),
+        Managed::Synced => (false, false, "Synced from Active Directory: change it there".into()),
+        Managed::Exchange => {
+            (false, false, "Distribution list or mail-enabled security group: add the user in Exchange Online once they have a mailbox".into())
+        }
+        Managed::Graph if v["isAssignableToRole"] == true => {
+            (true, false, "Role-assignable: its members get directory roles, so it isn't ticked for you".into())
+        }
+        Managed::Graph => (true, true, String::new()),
     };
-    if v["assignedLicenses"].as_array().is_some_and(|a| !a.is_empty()) {
+    if assigns_licences(v) {
         note = if note.is_empty() { "Assigns licences".into() } else { format!("{note}. Assigns licences") };
     }
     GroupChoice { id: s(v, "id"), name: s(v, "displayName"), kind: group_type(v), allowed, selected: preselect, note }
@@ -67,7 +95,7 @@ pub fn alias_problem(alias: &str) -> Option<String> {
         return Some("Enter a user name.".into());
     }
     if let Some(c) = alias.chars().find(|c| !(c.is_ascii_alphanumeric() || "'.-_!#^~".contains(*c))) {
-        return Some(format!("The user name can't contain '{c}'. Use letters, digits and . - _ only; choose the domain separately."));
+        return Some(format!("The user name can't contain '{c}'. Use letters, digits and ' . - _ ! # ^ ~ only; choose the domain separately."));
     }
     if alias.starts_with('.') || alias.ends_with('.') || alias.contains("..") {
         return Some("The user name can't start or end with a full stop, or have two in a row.".into());
@@ -184,7 +212,7 @@ impl Onboarding {
             Some(p)
         } else if self.domain().is_empty() || self.domain().contains(['@', ' ']) {
             Some("Choose or enter the domain.".into())
-        } else if !usage.is_empty() && (usage.len() != 2 || !usage.chars().all(|c| c.is_ascii_alphabetic())) {
+        } else if !crate::ops::is_usage_location(usage) {
             Some("The usage location is a two-letter country code, such as GB or US.".into())
         } else {
             password_problem(&self.password)
@@ -196,7 +224,8 @@ impl Onboarding {
         let mut body = json!({
             "accountEnabled": true,
             "displayName": self.display_name.trim(),
-            "mailNickname": alias.chars().filter(|c| c.is_ascii_alphanumeric() || "._-".contains(*c)).collect::<String>(),
+            // alias_problem allows only what a mail nickname can contain.
+            "mailNickname": alias,
             "userPrincipalName": self.upn(),
             "passwordProfile": { "password": self.password, "forceChangePasswordNextSignIn": self.force_change },
         });
@@ -783,6 +812,10 @@ mod tests {
         assert_eq!(body["userPrincipalName"], "ann@contoso.com");
         assert_eq!(body["usageLocation"], "GB");
         assert_eq!(body["passwordProfile"]["forceChangePasswordNextSignIn"], true);
+        let mut odd = wizard();
+        odd.alias = "o'neil~".into();
+        assert_eq!(odd.user_problem(), None);
+        assert_eq!(odd.body()["mailNickname"], "o'neil~", "the mail nickname must be the alias that was checked");
         assert_eq!(
             plan[1..],
             [

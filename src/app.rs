@@ -223,10 +223,13 @@ impl App {
     }
 
     /// Asks whether an administrator wants to approve `missing` scopes for `feature`, unless
-    /// they were offered already this session. Returns whether it asked.
+    /// each of them was offered already this session. Returns whether it asked.
     pub fn offer_scopes(&mut self, feature: &str, missing: Vec<String>) -> bool {
-        let key = missing.join(" ");
-        if !self.scopes_offered.insert(key) {
+        let mut new = false;
+        for scope in &missing {
+            new |= self.scopes_offered.insert(scope.to_ascii_lowercase());
+        }
+        if !new {
             return false;
         }
         let text = format!(
@@ -285,6 +288,8 @@ impl App {
                 if app.busy == 0 {
                     app.status = "Ready".into();
                 }
+                // `work` may have been granted more scopes (see `Auth::ensure_scopes`).
+                app.sync_scopes();
                 done(app, result);
             }));
             ctx.request_repaint();

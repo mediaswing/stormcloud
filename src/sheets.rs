@@ -423,7 +423,6 @@ impl App {
                 if let Some(f) = fresh_obj {
                     app.upsert(node, f);
                 }
-                app.sync_scopes();
                 if !missing.is_empty() {
                     app.offer_scopes(kind.title(), missing);
                 }

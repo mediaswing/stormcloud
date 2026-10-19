@@ -12,8 +12,8 @@ use crate::auth::NeedsConsent;
 use crate::dialogs::Dialog;
 use crate::graph::Graph;
 use crate::model::{group_type, s, sku_name, Node};
-use crate::onboarding::GROUP_SELECT;
-use crate::security::{explain, Need};
+use crate::onboarding::{assigns_licences, managed, Managed, GROUP_SELECT};
+use crate::security::{explain, join, Need};
 use crate::workflow::{self, Loadable, Shared, Step};
 use eframe::egui::{self, RichText};
 use serde_json::{json, Value};
@@ -37,6 +37,8 @@ pub struct RoleItem {
     pub assignment_id: Option<String>,
     pub role_id: String,
     pub scope: String,
+    /// For an eligible assignment, whether the role is activated now.
+    pub active: bool,
     pub selected: bool,
 }
 
@@ -96,7 +98,7 @@ pub enum Planned {
     Disable,
     Revoke,
     RemoveRole { assignment_id: String, name: String },
-    RemoveEligibleRole { role_id: String, scope: String, name: String },
+    RemoveEligibleRole { role_id: String, scope: String, name: String, active: bool },
     Convert { identity: String },
     Forward { identity: String, to: String, keep_copy: bool },
     RemoveGroup { id: String, name: String, exchange: Option<String>, assigns_licences: bool },
@@ -110,7 +112,10 @@ impl Planned {
             Planned::Disable => "Block sign-in (disable the account)".into(),
             Planned::Revoke => "Revoke sign-in sessions".into(),
             Planned::RemoveRole { name, .. } => format!("Remove the directory role {name}"),
-            Planned::RemoveEligibleRole { name, .. } => format!("Remove eligibility for the directory role {name} (PIM)"),
+            Planned::RemoveEligibleRole { name, active: false, .. } => format!("Remove eligibility for the directory role {name} (PIM)"),
+            Planned::RemoveEligibleRole { name, active: true, .. } => {
+                format!("Remove eligibility for the directory role {name} and end its activation (PIM)")
+            }
             Planned::Convert { .. } => "Convert the mailbox to a shared mailbox".into(),
             Planned::Forward { to, keep_copy, .. } => {
                 format!("Forward email to {to}{}", if *keep_copy { ", keeping a copy" } else { "" })
@@ -196,7 +201,12 @@ impl Offboarding {
         for r in f.roles.iter().filter(|r| r.selected) {
             chosen.push(match &r.assignment_id {
                 Some(id) => Planned::RemoveRole { assignment_id: id.clone(), name: r.name.clone() },
-                None => Planned::RemoveEligibleRole { role_id: r.role_id.clone(), scope: r.scope.clone(), name: r.name.clone() },
+                None => Planned::RemoveEligibleRole {
+                    role_id: r.role_id.clone(),
+                    scope: r.scope.clone(),
+                    name: r.name.clone(),
+                    active: r.active,
+                },
             });
         }
         let user_mailbox = self.mailbox_kind() == Some("UserMailbox");
@@ -272,7 +282,8 @@ impl Offboarding {
         }
         if matches!(f.mailbox, Mailbox::Unavailable(_)) && removes_licence {
             out.push(
-                "The mailbox couldn't be checked. If the user has one, it is disabled once its licence goes and deleted                  after 30 days: check it under Exchange Online before going on."
+                "The mailbox couldn't be checked. If the user has one, it is disabled once its licence goes and deleted \
+                 after 30 days: check it under Exchange Online before going on."
                     .into(),
             );
         }
@@ -343,7 +354,7 @@ fn step(planned: Planned, needs: Vec<usize>, user_id: String, upn: String) -> St
             g.delete(&format!("/roleManagement/directory/roleAssignments/{assignment_id}"))?;
             Ok("Removed".into())
         }
-        Planned::RemoveEligibleRole { role_id, scope, .. } => {
+        Planned::RemoveEligibleRole { role_id, scope, active, .. } => {
             let body = json!({
                 "action": "adminRemove",
                 "principalId": user_id,
@@ -352,7 +363,14 @@ fn step(planned: Planned, needs: Vec<usize>, user_id: String, upn: String) -> St
                 "justification": "Offboarding",
             });
             let r = g.post("/roleManagement/directory/roleEligibilityScheduleRequests", &body)?;
-            Ok(format!("Request {}", s(&r, "status")))
+            let mut done = format!("Request {}", s(&r, "status"));
+            // An activation can't be deleted as a plain role assignment; PIM removes it, unless
+            // removing the eligibility has ended it already.
+            if active && role_assigned(g, &user_id, &role_id, &scope)? {
+                let r = g.post("/roleManagement/directory/roleAssignmentScheduleRequests", &body)?;
+                done.push_str(&format!("; activation removal {}", s(&r, "status")));
+            }
+            Ok(done)
         }
         Planned::Convert { identity } => {
             g.invoke("Set-Mailbox", json!({ "Identity": identity, "Type": "Shared" }))?;
@@ -393,59 +411,39 @@ fn step(planned: Planned, needs: Vec<usize>, user_id: String, upn: String) -> St
 
 /// Reads everything offboarding can change for the user (runs on a worker thread). Parts that
 /// can't be read are noted rather than stopping it.
-fn load(g: &Graph, user_id: &str) -> anyhow::Result<(Found, bool)> {
-    let user = g.get(&format!(
-        "/users/{user_id}?$select=id,displayName,userPrincipalName,mail,userType,accountEnabled,onPremisesSyncEnabled,assignedLicenses,licenseAssignmentStates"
-    ))?;
-    let upn = s(&user, "userPrincipalName");
-    let mut problems = Vec::new();
+fn load(g: &Graph, user_id: &str, upn: &str) -> anyhow::Result<(Found, bool)> {
+    // The reads don't depend on each other, so they run at the same time.
+    let (user, (roles, mut problems), groups, names, mailbox) = std::thread::scope(|t| {
+        let user = t.spawn(|| {
+            g.get(&format!(
+                "/users/{user_id}?$select=id,displayName,userPrincipalName,mail,userType,accountEnabled,onPremisesSyncEnabled,assignedLicenses,licenseAssignmentStates"
+            ))
+        });
+        let roles = t.spawn(|| load_roles(g, user_id));
+        let groups = t.spawn(|| g.list(&format!("/users/{user_id}/memberOf/microsoft.graph.group?$select={GROUP_SELECT}&$top=999")));
+        let names = t.spawn(|| g.list("/subscribedSkus").unwrap_or_default());
+        let mailbox = g.invoke("Get-Mailbox", json!({ "Identity": upn }));
+        (join(user), join(roles), join(groups), join(names), mailbox)
+    });
+    let user = user?;
 
-    let mut roles = Vec::new();
-    match g.list(&format!(
-        "/roleManagement/directory/roleAssignments?$filter=principalId eq '{user_id}'&$expand=roleDefinition($select=displayName)"
-    )) {
-        Ok(items) => roles.extend(items.iter().map(|a| RoleItem {
-            name: scoped(&s(&a["roleDefinition"], "displayName"), &s(a, "directoryScopeId")),
-            assignment_id: Some(s(a, "id")),
-            role_id: s(a, "roleDefinitionId"),
-            scope: s(a, "directoryScopeId"),
-            selected: true,
-        })),
-        Err(e) => problems.push(format!("The directory roles couldn't be read, so none are removed: {e}")),
-    }
-    // Eligible assignments need PIM, so a tenant without Entra ID P2 can't list them.
-    match g.list(&format!(
-        "/roleManagement/directory/roleEligibilitySchedules?$filter=principalId eq '{user_id}'&$expand=roleDefinition($select=displayName)"
-    )) {
-        Ok(items) => roles.extend(items.iter().map(|a| RoleItem {
-            name: scoped(&s(&a["roleDefinition"], "displayName"), &s(a, "directoryScopeId")),
-            assignment_id: None,
-            role_id: s(a, "roleDefinitionId"),
-            scope: s(a, "directoryScopeId"),
-            selected: true,
-        })),
-        Err(e) => log::info!("Eligible role assignments not read: {e}"),
-    }
-    // A role activated through PIM is listed both as active and as eligible. Both are removed, and
-    // the report shows if removing the active one directly was refused.
+    let groups = match groups {
+        Ok(items) => {
+            let mut groups: Vec<GroupItem> = items.iter().map(group_item).collect();
+            groups.sort_by_key(|g| (!g.removable, g.name.to_lowercase()));
+            groups
+        }
+        Err(e) => {
+            problems.push(format!("The groups couldn't be read, so none are removed: {e}"));
+            Vec::new()
+        }
+    };
 
-    let mut groups = Vec::new();
-    match g.list(&format!("/users/{user_id}/memberOf/microsoft.graph.group?$select={GROUP_SELECT}&$top=999")) {
-        Ok(items) => groups.extend(items.iter().map(group_item)),
-        Err(e) => problems.push(format!("The groups couldn't be read, so none are removed: {e}")),
-    }
-    groups.sort_by_key(|g| (!g.removable, g.name.to_lowercase()));
-
-    let names: HashMap<String, String> = g
-        .list("/subscribedSkus")
-        .unwrap_or_default()
-        .iter()
-        .map(|v| (s(v, "skuId"), sku_name(&s(v, "skuPartNumber"))))
-        .collect();
+    let names: HashMap<String, String> = names.iter().map(|v| (s(v, "skuId"), sku_name(&s(v, "skuPartNumber")))).collect();
     let group_names: HashMap<&str, &str> = groups.iter().map(|g| (g.id.as_str(), g.name.as_str())).collect();
     let licences = licence_items(&user, &names, &group_names);
 
-    let (mailbox, needs_consent) = match g.invoke("Get-Mailbox", json!({ "Identity": upn })) {
+    let (mailbox, needs_consent) = match mailbox {
         Ok(found) => match found.first() {
             Some(m) => (Mailbox::Found { kind: s(m, "RecipientTypeDetails"), identity: crate::exchange::identity(m) }, false),
             None => (Mailbox::None, false),
@@ -460,6 +458,80 @@ fn load(g: &Graph, user_id: &str) -> anyhow::Result<(Found, bool)> {
     Ok((Found { user, mailbox, roles, groups, licences, problems }, needs_consent))
 }
 
+/// The user's directory roles, active and eligible, and what couldn't be read about them.
+fn load_roles(g: &Graph, user_id: &str) -> (Vec<RoleItem>, Vec<String>) {
+    let mut problems = Vec::new();
+    let mut roles = Vec::new();
+    match g.list(&format!(
+        "/roleManagement/directory/roleAssignments?$filter=principalId eq '{user_id}'&$expand=roleDefinition($select=displayName)"
+    )) {
+        Ok(items) => roles.extend(items.iter().map(|a| RoleItem {
+            name: scoped(&s(&a["roleDefinition"], "displayName"), &s(a, "directoryScopeId")),
+            assignment_id: Some(s(a, "id")),
+            role_id: s(a, "roleDefinitionId"),
+            scope: s(a, "directoryScopeId"),
+            active: false,
+            selected: true,
+        })),
+        Err(e) => problems.push(format!("The directory roles couldn't be read, so none are removed: {e}")),
+    }
+    // Eligible assignments need PIM, so a tenant without Entra ID P2 can't list them.
+    match g.list(&format!(
+        "/roleManagement/directory/roleEligibilitySchedules?$filter=principalId eq '{user_id}'&$expand=roleDefinition($select=displayName)"
+    )) {
+        Ok(items) => roles.extend(items.iter().map(|a| RoleItem {
+            name: scoped(&s(&a["roleDefinition"], "displayName"), &s(a, "directoryScopeId")),
+            assignment_id: None,
+            role_id: s(a, "roleDefinitionId"),
+            scope: s(a, "directoryScopeId"),
+            active: false,
+            selected: true,
+        })),
+        Err(e) => log::info!("Eligible role assignments not read: {e}"),
+    }
+    if roles.iter().any(|r| r.assignment_id.is_none()) {
+        match g.list(&format!("/roleManagement/directory/roleAssignmentScheduleInstances?$filter=principalId eq '{user_id}'")) {
+            Ok(items) => {
+                let activated: Vec<(String, String)> = items
+                    .iter()
+                    .filter(|a| a["assignmentType"] == "Activated")
+                    .map(|a| (s(a, "roleDefinitionId"), s(a, "directoryScopeId")))
+                    .collect();
+                merge_activated(&mut roles, &activated);
+            }
+            Err(e) => problems.push(format!(
+                "Roles activated through PIM couldn't be told apart, so removing one may fail and stop the account \
+                 being deleted: {e}"
+            )),
+        }
+    }
+    (roles, problems)
+}
+
+/// Whether the user has an active assignment of the role at the scope.
+fn role_assigned(g: &Graph, user_id: &str, role_id: &str, scope: &str) -> anyhow::Result<bool> {
+    let items = g.list(&format!(
+        "/roleManagement/directory/roleAssignments?$filter=principalId eq '{user_id}' and roleDefinitionId eq '{role_id}'"
+    ))?;
+    Ok(items.iter().any(|a| s(a, "directoryScopeId") == scope))
+}
+
+/// Folds each role activated through PIM, which is listed both as an active and as an eligible
+/// assignment, into its eligible one: the active one can't be deleted directly, so removing it
+/// would always fail (and stop the account being deleted).
+fn merge_activated(roles: &mut Vec<RoleItem>, activated: &[(String, String)]) {
+    let is_activated = |r: &RoleItem| activated.iter().any(|(role, scope)| *role == r.role_id && *scope == r.scope);
+    let eligible: Vec<(String, String)> =
+        roles.iter().filter(|r| r.assignment_id.is_none()).map(|r| (r.role_id.clone(), r.scope.clone())).collect();
+    roles.retain(|r| r.assignment_id.is_none() || !(is_activated(r) && eligible.contains(&(r.role_id.clone(), r.scope.clone()))));
+    for r in roles.iter_mut().filter(|r| r.assignment_id.is_none()) {
+        r.active = is_activated(r);
+        if r.active {
+            r.name.push_str(", active now");
+        }
+    }
+}
+
 /// A role's name, with its scope when it isn't the whole directory.
 fn scoped(name: &str, scope: &str) -> String {
     if scope.is_empty() || scope == "/" { name.to_string() } else { format!("{name} (scope {scope})") }
@@ -467,18 +539,13 @@ fn scoped(name: &str, scope: &str) -> String {
 
 /// Whether the user can be taken out of a group here, and how.
 pub fn group_item(v: &Value) -> GroupItem {
-    let types = v["groupTypes"].as_array().cloned().unwrap_or_default();
-    let unified = types.iter().any(|t| t == "Unified");
-    let assigns_licences = v["assignedLicenses"].as_array().is_some_and(|a| !a.is_empty());
-    let mail_list = v["mailEnabled"] == true && !unified;
-    let (removable, mut note) = if types.iter().any(|t| t == "DynamicMembership") || !s(v, "membershipRule").is_empty() {
-        (false, "Dynamic membership, set by its rule".to_string())
-    } else if v["onPremisesSyncEnabled"] == true {
-        (false, "Synced from Active Directory, so it is changed there".into())
-    } else if mail_list {
-        (true, "Changed in Exchange Online".into())
-    } else {
-        (true, String::new())
+    let managed = managed(v);
+    let assigns_licences = assigns_licences(v);
+    let (removable, mut note) = match managed {
+        Managed::Dynamic => (false, "Dynamic membership, set by its rule".to_string()),
+        Managed::Synced => (false, "Synced from Active Directory, so it is changed there".into()),
+        Managed::Exchange => (true, "Changed in Exchange Online".into()),
+        Managed::Graph => (true, String::new()),
     };
     if assigns_licences {
         note = if note.is_empty() { "Assigns licences".into() } else { format!("{note}; assigns licences") };
@@ -491,7 +558,7 @@ pub fn group_item(v: &Value) -> GroupItem {
         id: s(v, "id"),
         name: s(v, "displayName"),
         kind: group_type(v),
-        exchange: mail_list.then_some(identity),
+        exchange: (managed == Managed::Exchange).then_some(identity),
         removable,
         assigns_licences,
         note,
@@ -547,7 +614,8 @@ impl App {
         };
         let id = self.push(Dialog::Offboard(Box::new(wizard)));
         let user_id = s(&user, "id");
-        self.spawn(format!("Reading {name}…"), move |g| load(g, &user_id), move |app, r| {
+        let upn = s(&user, "userPrincipalName");
+        self.spawn(format!("Reading {name}…"), move |g| load(g, &user_id, &upn), move |app, r| {
             let mut consent = false;
             if let Some(Dialog::Offboard(w)) = app.dialog_mut(id) {
                 w.found = match r {
@@ -811,6 +879,23 @@ mod tests {
     fn deletes_last_and_only_if_everything_else_worked() {
         let plan = order(vec![Planned::Delete, Planned::Disable, Planned::RemoveLicence { sku_id: "s".into(), name: "E3".into() }]);
         assert_eq!(plan.last().unwrap(), &(Planned::Delete, vec![0, 1]));
+    }
+
+    #[test]
+    fn folds_activated_roles_into_their_eligibility() {
+        let role = |id: Option<&str>, role: &str| RoleItem {
+            name: role.into(),
+            assignment_id: id.map(String::from),
+            role_id: role.into(),
+            scope: "/".into(),
+            active: false,
+            selected: true,
+        };
+        // Activated through PIM, eligible but not activated, and assigned permanently.
+        let mut roles = vec![role(Some("a1"), "admin"), role(None, "admin"), role(None, "reader"), role(Some("a2"), "billing")];
+        merge_activated(&mut roles, &[("admin".into(), "/".into()), ("billing".into(), "/".into())]);
+        let left: Vec<(&str, bool, bool)> = roles.iter().map(|r| (r.name.as_str(), r.assignment_id.is_some(), r.active)).collect();
+        assert_eq!(left, [("admin, active now", false, true), ("reader", false, false), ("billing", true, false)]);
     }
 
     #[test]

@@ -211,6 +211,19 @@ fn delete_effect(v: &Value) -> &'static str {
     }
 }
 
+/// The order MFA methods are deleted in: phone numbers last, as one that is the default method
+/// can't be deleted while other methods remain, and the mobile number after the alternate
+/// mobile and office numbers, as it can't be deleted while an alternate mobile remains.
+fn deletion_order(m: &Value) -> u8 {
+    if method_type(m) != "phoneAuthenticationMethod" {
+        0
+    } else if m["phoneType"] == "mobile" {
+        2
+    } else {
+        1
+    }
+}
+
 fn load_methods(g: &Graph, user_id: &str) -> Result<Vec<Value>> {
     require(g, AUTH_METHODS_SCOPE)?;
     g.list(&format!("/users/{user_id}/authentication/methods")).map_err(|e| explain(e, Need::Methods))
@@ -426,6 +439,30 @@ pub struct Facts {
     /// Newest first.
     pub sign_ins: Option<Vec<Value>>,
     pub sessions_valid_from: String,
+    pub created: String,
+    pub password_changed: String,
+}
+
+/// Seconds since 1970 of a Graph date and time such as `2026-10-19T08:00:00Z` (read as UTC).
+fn seconds(t: &str) -> Option<i64> {
+    let num = |r: std::ops::Range<usize>| t.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+    Some(days * 86400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// Whether sessions were revoked: Graph also sets the time sessions are valid from when the
+/// account is created and when its password changes, so only a later time means a revocation.
+fn sessions_revoked(f: &Facts) -> bool {
+    let Some(from) = seconds(&f.sessions_valid_from) else { return false };
+    let since = [&f.created, &f.password_changed].iter().filter_map(|t| seconds(t)).max().unwrap_or(i64::MIN);
+    from > since.saturating_add(120)
 }
 
 /// Plain findings about why a user might be unable to sign in, most important first.
@@ -500,7 +537,7 @@ pub fn diagnose(f: &Facts) -> Vec<String> {
             ));
         }
     }
-    if !f.sessions_valid_from.is_empty() {
+    if sessions_revoked(f) {
         out.push(format!(
             "Sessions from before {} UTC are no longer valid (sessions were revoked then).",
             datetime(&Value::String(f.sessions_valid_from.clone()))
@@ -512,11 +549,13 @@ pub fn diagnose(f: &Facts) -> Vec<String> {
     out
 }
 
+/// The result of a scoped thread, passing on its panic.
+pub fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    h.join().unwrap_or_else(|p| std::panic::resume_unwind(p))
+}
+
 /// What the overview reads, each part on its own so one that fails doesn't hide the others.
 fn load_overview(g: &Graph, user_id: &str, missing: &mut Vec<String>) -> Result<TabBody> {
-    let user = g.get(&format!(
-        "/users/{user_id}?$select=id,accountEnabled,userType,onPremisesSyncEnabled,lastPasswordChangeDateTime,signInSessionsValidFromDateTime,passwordPolicies"
-    ))?;
     // Each scope is checked once; what can't be read without it says so.
     let mut granted = |scope: &str| match require(g, scope) {
         Ok(()) => Ok(()),
@@ -536,18 +575,32 @@ fn load_overview(g: &Graph, user_id: &str, missing: &mut Vec<String>) -> Result<
             None => anyhow!("{e}"),
         }),
     };
-    let methods = same(&methods_ok).and_then(|()| g.list(&format!("/users/{user_id}/authentication/methods")).map_err(|e| explain(e, Need::Methods)));
     let reports = |path: String| -> Result<Value> {
         same(&audit_ok)?;
         g.get(&path).map_err(|e| explain(e, Need::Reports))
     };
-    let sign_ins = reports(format!("/auditLogs/signIns?$filter=userId eq '{user_id}'&$top=25"))
-        .map(|v| v["value"].as_array().cloned().unwrap_or_default());
-    let activity = reports(format!("/users/{user_id}?$select=signInActivity"));
-    let registration = reports(format!("/reports/authenticationMethods/userRegistrationDetails/{user_id}")).map(|v| {
-        // The documentation's example wraps the object in "value".
-        if v["value"].is_object() { v["value"].clone() } else { v }
+    // The reads don't depend on each other, so they run at the same time.
+    let (user, methods, sign_ins, activity, registration) = std::thread::scope(|t| {
+        let user = t.spawn(|| {
+            g.get(&format!(
+                "/users/{user_id}?$select=id,accountEnabled,userType,onPremisesSyncEnabled,createdDateTime,lastPasswordChangeDateTime,signInSessionsValidFromDateTime,passwordPolicies"
+            ))
+        });
+        let methods = t.spawn(|| {
+            same(&methods_ok).and_then(|()| g.list(&format!("/users/{user_id}/authentication/methods")).map_err(|e| explain(e, Need::Methods)))
+        });
+        let sign_ins = t.spawn(|| {
+            reports(format!("/auditLogs/signIns?$filter=userId eq '{user_id}'&$top=25"))
+                .map(|v| v["value"].as_array().cloned().unwrap_or_default())
+        });
+        let activity = t.spawn(|| reports(format!("/users/{user_id}?$select=signInActivity")));
+        let registration = reports(format!("/reports/authenticationMethods/userRegistrationDetails/{user_id}")).map(|v| {
+            // The documentation's example wraps the object in "value".
+            if v["value"].is_object() { v["value"].clone() } else { v }
+        });
+        (join(user), join(methods), join(sign_ins), join(activity), registration)
     });
+    let user = user?;
 
     let mut fields: Vec<(String, String)> = Vec::new();
     let mut field = |label: &str, value: String| fields.push((label.to_string(), value));
@@ -602,6 +655,8 @@ fn load_overview(g: &Graph, user_id: &str, missing: &mut Vec<String>) -> Result<
         methods: methods.ok(),
         sign_ins: sign_ins.ok(),
         sessions_valid_from: s(&user, "signInSessionsValidFromDateTime"),
+        created: s(&user, "createdDateTime"),
+        password_changed: s(&user, "lastPasswordChangeDateTime"),
     };
     for (i, finding) in diagnose(&facts).into_iter().enumerate() {
         field(if i == 0 { "Troubleshooting" } else { "" }, finding);
@@ -832,8 +887,7 @@ impl App {
             ));
             return;
         }
-        // Phone numbers last: one that is the default method can't be deleted while other methods remain.
-        targets.sort_by_key(|m| method_type(m) == "phoneAuthenticationMethod");
+        targets.sort_by_key(deletion_order);
         let list: Vec<String> = targets
             .iter()
             .map(|m| {
@@ -959,6 +1013,12 @@ mod tests {
         let deleted = ["microsoftAuthenticatorAuthenticationMethod", "phoneAuthenticationMethod", "softwareOathAuthenticationMethod", "fido2AuthenticationMethod"];
         assert!(kept.iter().all(|k| !is_mfa_method(&method(k, json!({})))));
         assert!(deleted.iter().all(|k| is_mfa_method(&method(k, json!({})))));
+
+        let phone = |kind: &str| method("phoneAuthenticationMethod", json!({ "phoneType": kind }));
+        let mut targets = [phone("mobile"), phone("alternateMobile"), method("fido2AuthenticationMethod", json!({})), phone("office")];
+        targets.sort_by_key(deletion_order);
+        let order: Vec<String> = targets.iter().map(|m| s(m, "phoneType")).collect();
+        assert_eq!(order, ["", "alternateMobile", "office", "mobile"]);
     }
 
     fn sign_in(code: i64, reason: &str) -> Value {
@@ -1003,6 +1063,19 @@ mod tests {
         };
         assert_eq!(diagnose(&healthy), ["The latest sign-in, at 2026-10-19 08:00, succeeded."]);
         assert_eq!(diagnose(&Facts::default()), ["No problems found."]);
+
+        // Graph sets the time sessions are valid from on creating the account and changing its password too.
+        let created = Facts {
+            sessions_valid_from: "2026-03-01T09:00:05Z".into(),
+            created: "2026-03-01T09:00:04Z".into(),
+            password_changed: "2026-03-01T09:00:04Z".into(),
+            ..Default::default()
+        };
+        assert_eq!(diagnose(&created), ["No problems found."]);
+        let revoked = Facts { sessions_valid_from: "2026-10-18T17:30:00Z".into(), ..created };
+        assert!(diagnose(&revoked)[0].starts_with("Sessions from before 2026-10-18 17:30 UTC"));
+        assert_eq!(seconds("1970-01-02T00:00:01Z"), Some(86401));
+        assert_eq!(seconds("2000-03-01T00:00:00Z"), Some(951868800));
 
         let guessing = Facts { sign_ins: Some(vec![sign_in(50126, "Invalid password"); 6]), ..Default::default() };
         assert!(diagnose(&guessing).iter().any(|x| x.starts_with("6 of the recent sign-ins failed")));
