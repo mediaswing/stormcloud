@@ -4,6 +4,13 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Smaller macOS and Linux downloads: the program no longer includes its symbol table, as on
+  Windows.
+
 ## [1.3.0] - 2026-10-19
 
 Adds managing users' authentication and security, and wizards for onboarding and offboarding.
