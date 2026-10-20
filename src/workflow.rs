@@ -8,6 +8,7 @@
 
 use crate::app::{App, Bold};
 use crate::graph::Graph;
+use crate::i18n::{t, tf};
 use eframe::egui::{self, Align, Layout, RichText};
 use egui_extras::{Column, TableBuilder};
 use std::sync::{Arc, Mutex};
@@ -78,8 +79,8 @@ pub fn execute<G, C>(g: &G, ctx: &mut C, steps: Vec<Step<G, C>>, progress: &Shar
         };
         if let Some(n) = blocker {
             let reason = match progress.lock().unwrap().steps.get(n) {
-                Some(s) if n < i => format!("Not run, because \"{}\" did not succeed", s.label),
-                _ => "Not run".to_string(),
+                Some(s) if n < i => tf("workflow.skipped_because", &[("step", &s.label)]),
+                _ => t("workflow.not_run"),
             };
             log::info!("Workflow step skipped: {}: {reason}", step.label);
             set(State::Skipped(reason));
@@ -113,22 +114,22 @@ pub fn summary(p: &Progress) -> String {
     let (done, failed, skipped) = counts(p);
     if !p.finished {
         let at = p.steps.iter().position(|s| matches!(s.state, State::Running | State::Pending)).map_or(0, |i| i + 1);
-        return format!("Working… step {at} of {}", p.steps.len());
+        return tf("workflow.working_step", &[("step", &at), ("count", &p.steps.len())]);
     }
     if failed == 0 && skipped == 0 {
-        format!("Completed: all {done} steps succeeded.")
+        tf("workflow.completed", &[("count", &done)])
     } else {
-        format!("Not completed: {done} succeeded, {failed} failed, {skipped} not run. Review the failures below.")
+        tf("workflow.not_completed", &[("done", &done), ("failed", &failed), ("skipped", &skipped)])
     }
 }
 
-fn state_text(state: &State) -> (&'static str, String) {
+fn state_text(state: &State) -> (String, String) {
     match state {
-        State::Pending => ("Waiting", String::new()),
-        State::Running => ("Running…", String::new()),
-        State::Done(t) => ("✔ Done", t.clone()),
-        State::Failed(t) => ("✖ Failed", t.clone()),
-        State::Skipped(t) => ("Not run", t.clone()),
+        State::Pending => (t("workflow.waiting"), String::new()),
+        State::Running => (t("workflow.running"), String::new()),
+        State::Done(text) => (format!("✔ {}", t("workflow.done")), text.clone()),
+        State::Failed(text) => (format!("✖ {}", t("workflow.failed")), text.clone()),
+        State::Skipped(text) => (t("workflow.not_run"), text.clone()),
     }
 }
 
@@ -157,7 +158,8 @@ pub fn report_text(title: &str, p: &Progress) -> String {
     out
 }
 
-pub const REPORT_HEADERS: [&str; 4] = ["Step", "Action", "Result", "Details"];
+/// The keys of the column titles of a report.
+pub const REPORT_HEADERS: [&str; 4] = ["col.step", "col.action", "col.result", "col.details"];
 
 /// The progress of each step, then its result.
 pub fn progress_ui(ui: &mut egui::Ui, id: u64, p: &Progress) {
@@ -186,9 +188,9 @@ pub fn progress_ui(ui: &mut egui::Ui, id: u64, p: &Progress) {
         .column(Column::initial(80.0))
         .column(Column::remainder().clip(true))
         .header(row_h, |mut h| {
-            for t in ["", "Action", "Result", "Details"] {
+            for key in ["", "col.action", "col.result", "col.details"] {
                 h.col(|ui| {
-                    ui.label(RichText::new(t).bold());
+                    ui.label(RichText::new(if key.is_empty() { String::new() } else { t(key) }).bold());
                 });
             }
         })
@@ -202,8 +204,8 @@ pub fn progress_ui(ui: &mut egui::Ui, id: u64, p: &Progress) {
                     State::Skipped(_) | State::Pending => Some(weak),
                     _ => None,
                 };
-                let paint = |t: &str| {
-                    let r = RichText::new(t);
+                let paint = |text: &str| {
+                    let r = RichText::new(text);
                     match color {
                         Some(c) => r.color(c),
                         None => r,
@@ -219,7 +221,7 @@ pub fn progress_ui(ui: &mut egui::Ui, id: u64, p: &Progress) {
                     if step.state == State::Running {
                         ui.spinner();
                     } else {
-                        ui.label(paint(result));
+                        ui.label(paint(&result));
                     }
                 });
                 row.col(|ui| {
@@ -239,20 +241,22 @@ pub fn report_buttons(app: &mut App, ui: &mut egui::Ui, title: &str, file_name: 
     ui.horizontal(|ui| {
         if !finished {
             ui.spinner();
-            ui.label("Working… don't close the app until every step has finished.");
+            ui.label(t("workflow.dont_close"));
             return;
         }
-        if ui.button("Save report…").clicked() {
+        if ui.button(t("workflow.save_report")).clicked() {
             let rows = report_rows(&p.lock().unwrap());
-            if let Some(path) = app.save_csv("Save report", file_name, &REPORT_HEADERS, &rows) {
-                app.status = format!("Saved the report to {}", path.display());
+            let headers: Vec<String> = REPORT_HEADERS.iter().map(|h| t(h)).collect();
+            let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+            if let Some(path) = app.save_csv(&t("workflow.save_report_title"), file_name, &headers, &rows) {
+                app.status = tf("workflow.saved_report", &[("path", &path.display())]);
             }
         }
-        if ui.button("Copy report").clicked() {
+        if ui.button(t("workflow.copy_report")).clicked() {
             ui.ctx().copy_text(report_text(title, &p.lock().unwrap()));
-            app.status = "Copied the report to the clipboard".into();
+            app.status = t("workflow.copied_report");
         }
-        close = ui.button("  Close  ").clicked();
+        close = ui.button(format!("  {}  ", t("dialog.close"))).clicked();
     });
     close
 }
@@ -273,7 +277,7 @@ impl App {
         log::info!("Workflow started: {label} ({} steps)", steps.len());
         let title = label.to_string();
         self.spawn(
-            format!("{label}…"),
+            tf("status.working", &[("task", &label)]),
             move |g| {
                 execute(g, &mut ctx, steps, &shared, &|| repaint.request_repaint());
                 Ok(ctx)
@@ -282,8 +286,9 @@ impl App {
                 let progress = progress.clone();
                 move |app, r: anyhow::Result<C>| {
                     let p = progress.lock().unwrap();
+                    let (succeeded, failed, skipped) = counts(&p);
+                    log::info!("Workflow finished: {title}: {succeeded} succeeded, {failed} failed, {skipped} not run");
                     app.status = format!("{title}: {}", summary(&p));
-                    log::info!("Workflow finished: {}", app.status);
                     if let Ok(ctx) = r {
                         done(app, ctx, &p);
                     }
@@ -294,7 +299,8 @@ impl App {
     }
 }
 
-/// A heading for a wizard page: its title and where it is among the pages.
+/// A heading for a wizard page: its title and where it is among the pages, given by the keys of
+/// their names.
 pub fn page_heading(ui: &mut egui::Ui, title: &str, pages: &[&str], current: usize) {
     ui.heading(title);
     ui.horizontal_wrapped(|ui| {
@@ -302,7 +308,7 @@ pub fn page_heading(ui: &mut egui::Ui, title: &str, pages: &[&str], current: usi
             if i > 0 {
                 ui.label(RichText::new("›").weak());
             }
-            let text = RichText::new(format!("{}. {p}", i + 1));
+            let text = RichText::new(format!("{}. {}", i + 1, t(p)));
             ui.label(if i == current { text.bold().underline() } else { text.weak() });
         }
     });

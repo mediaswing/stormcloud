@@ -95,12 +95,42 @@ port = 3306
 user = stormcloud
 database = entra
 tls = true
+
+[interface]
+language = en
+translation_model =
 ```
 
 Edit it from **File › Settings…** or by hand. With `remember_sign_in = true` the refresh token is
 saved to `token.json` in the same folder (owner-only permissions on macOS/Linux); otherwise you sign in
 each time the app starts. **File › Sign out** deletes it. The `[cloud]` section lets you point at a
 national cloud.
+
+## Language
+
+**File › Language…** shows the app in English or one of about 30 other languages, including Welsh,
+Irish, French, German, Spanish, Polish and Ukrainian. The app is translated on your computer by a
+local AI model in [Ollama](https://ollama.com), so its text never leaves it. Install Ollama, get a
+model (`ollama pull gemma3:4b` works well), choose a language, then press **Translate the app
+into…**. It takes a few minutes; the progress shows in the dialog and the status bar, and **Stop
+translating** keeps what has been done so far. Choose a **Translation model** if Ollama has more
+than one. Once a language has been translated, choosing it switches the app straight away. The
+menu item and the label of the list always say "(Language)" in English too, so you can find your
+way back.
+
+Translations by a small AI model can contain mistakes. Each is saved as a JSON file in the
+`languages` folder next to `settings.ini`, where you can correct it or share it. Text a translation
+leaves out, or gets wrong (for example by losing a `{name}` value), is shown in English, and
+translating again fills it in. A file for a language that isn't in the list, such as `eo.json` for
+Esperanto, is offered as well, using the `language` name inside it. Only use translation files from
+people you trust: a file can't run anything, but it decides what every button and warning says.
+
+Languages written in other alphabets, such as Arabic, Hindi or Chinese, aren't offered yet, because
+the window can't draw them. Only the app's own text is translated. What Microsoft sends (error
+messages, role and product names) stays as it is, and so does the debug log. CSV exports of a list
+and database exports stay in English whatever the language, so the column names and values are the
+same each time and an exported user list can be imported again; import results and wizard reports
+are in the app's language.
 
 ## Exchange Online
 
@@ -206,7 +236,8 @@ onboarding report doesn't include the initial password, which is shown separatel
 
 **Export list…** in the Action menu saves the current list to a
 CSV file, with the columns shown plus each object's ID. It saves what's on screen, so filter and sort
-first to export part of a list. The file is UTF-8 with a byte order mark, so Excel shows accented
+first to export part of a list. Its headers and values are in English whatever the language of the
+app. The file is UTF-8 with a byte order mark, so Excel shows accented
 names correctly. A value Excel would run as a formula (one starting with `=`, `+`, `-` or `@`) is
 saved with a leading apostrophe.
 
@@ -243,7 +274,8 @@ Like a CSV export it saves what's on screen, so filter first to export part of a
 
 - The table is created if it doesn't exist (`utf8mb4`), with the object's ID (`object_id`, or
   `sku_id` for licences) as the primary key, a `TEXT` column for each column shown, named from its
-  header (`Last sign-in` becomes `last_sign_in`), and `exported_at`, the UTC time of the export.
+  English header (`Last sign-in` becomes `last_sign_in`), and `exported_at`, the UTC time of the
+  export. Values such as `Yes` and `No` are in English too, whatever the language of the app.
 - The table name suggested is `entra_users`, `entra_groups` and so on. An existing table is only
   used if an earlier export made it (it has the ID and `exported_at` columns), so a table that
   belongs to something else is never changed.

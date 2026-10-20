@@ -3,6 +3,7 @@
 use crate::app::App;
 use crate::bulk::Bulk;
 use crate::graph::Graph;
+use crate::i18n::{t, tf};
 use crate::ops::item_actions;
 use crate::sheets::Sheet;
 use crate::app::Bold;
@@ -30,6 +31,7 @@ pub enum Dialog {
     Bulk(Box<Bulk>),
     Onboard(Box<crate::onboarding::Onboarding>),
     Offboard(Box<crate::offboarding::Offboarding>),
+    Language(Box<crate::language::LanguageDialog>),
     /// A device code sign-in; `approval` when it is only to approve more permissions.
     DeviceCode { message: String, uri: String, code: String, approval: bool, cancelled: Arc<AtomicBool> },
     ContextMenu,
@@ -220,7 +222,7 @@ impl App {
         p.searched = Some(query.clone());
         let fetch = p.fetch.clone();
         let q = query.clone();
-        self.spawn("Searching…", move |g| fetch(g, &q), move |app, r| {
+        self.spawn(t("status.searching"), move |g| fetch(g, &q), move |app, r| {
             let Some(Dialog::Picker(p)) = app.dialog_mut(dialog_id) else { return };
             if p.searched.as_deref() != Some(query.as_str()) {
                 return;
@@ -284,15 +286,15 @@ impl App {
                     }
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        let ok = ui.button("   OK   ");
+                        let ok = ui.button(format!("   {}   ", t("dialog.ok")));
                         if first {
                             ok.request_focus();
                         }
                         close |= ok.clicked();
                         if let Some(secret) = copy
-                            && ui.button("Copy to clipboard").clicked() {
+                            && ui.button(t("dialog.copy")).clicked() {
                                 ui.ctx().copy_text(secret.clone());
-                                self.status = "Copied to clipboard".into();
+                                self.status = t("status.copied");
                             }
                     });
                 });
@@ -307,8 +309,8 @@ impl App {
                     ui.add(egui::Label::new(text.as_str()).wrap());
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        let yes = ui.button("  Yes  ");
-                        let no = ui.button("  No  ");
+                        let yes = ui.button(format!("  {}  ", t("dialog.yes")));
+                        let no = ui.button(format!("  {}  ", t("dialog.no")));
                         if first {
                             no.request_focus();
                         }
@@ -337,22 +339,23 @@ impl App {
             Dialog::Bulk(bulk) => self.show_bulk(ctx, modal, id, bulk, first, escape),
             Dialog::Onboard(w) => self.show_onboarding(ctx, modal, id, w, escape),
             Dialog::Offboard(w) => self.show_offboarding(ctx, modal, id, w, escape),
+            Dialog::Language(d) => self.show_language(ctx, modal, id, d, first, escape),
             Dialog::DeviceCode { message, uri, code, approval, cancelled } => {
                 let approval = *approval;
                 let mut close = escape;
                 modal.show(ctx, |ui| {
                     ui.set_max_width(520.0);
-                    ui.heading(if approval { "Approve permissions" } else { "Sign in to Microsoft Entra ID" });
+                    ui.heading(t(if approval { "scopes.approve_title" } else { "signin.heading" }));
                     ui.add_space(6.0);
                     ui.add(egui::Label::new(message.as_str()).wrap());
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        ui.label("Code:");
+                        ui.label(t("signin.code"));
                         ui.add(egui::Label::new(RichText::new(code.as_str()).monospace().size(24.0).strong()).selectable(true));
                     });
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        let open = ui.button("Copy code and open browser");
+                        let open = ui.button(t("signin.copy_and_open"));
                         if first {
                             open.request_focus();
                         }
@@ -360,10 +363,10 @@ impl App {
                             ui.ctx().copy_text(code.clone());
                             ui.ctx().open_url(egui::OpenUrl::new_tab(uri.as_str()));
                         }
-                        if ui.button("Copy code").clicked() {
+                        if ui.button(t("signin.copy")).clicked() {
                             ui.ctx().copy_text(code.clone());
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(t("dialog.cancel")).clicked() {
                             close = true;
                         }
                         ui.spinner();
@@ -385,12 +388,12 @@ impl App {
                 modal.show(ctx, |ui| {
                     ui.set_min_width(260.0);
                     let name = self.selected().map(|o| self.node.object_name(o)).unwrap_or_default();
-                    ui.label(RichText::new(if name.is_empty() { "Actions".to_string() } else { name }).bold());
+                    ui.label(RichText::new(if name.is_empty() { t("pane.actions") } else { name }).bold());
                     ui.separator();
                     ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
                         let acts = if self.selected().is_some() { item_actions(self.node) } else { Vec::new() };
                         if acts.is_empty() {
-                            ui.label("No actions available");
+                            ui.label(t("menu.no_actions"));
                         }
                         for (i, act) in acts.into_iter().enumerate() {
                             let r = self.action_button(ui, act);
@@ -407,43 +410,43 @@ impl App {
                 let mut close = escape;
                 modal.show(ctx, |ui| {
                     ui.set_max_width(560.0);
-                    ui.heading("Keyboard shortcuts");
+                    ui.heading(t("menu.shortcuts"));
                     ui.add_space(6.0);
                     let cmd = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
                     let rows: Vec<(String, &str)> = vec![
-                        ("F6 / Shift+F6".into(), "Move between the console tree, results and Actions pane"),
-                        ("Tab / Shift+Tab".into(), "Move between controls"),
-                        ("↑ ↓ PgUp PgDn Home End".into(), "Move the selection"),
-                        ("← →".into(), "Collapse / expand in the console tree"),
-                        ("Enter".into(), "Open the selected item's properties"),
-                        ("Shift+F10".into(), "Actions for the selected item (context menu)"),
-                        ("F10".into(), "Move to the menu bar"),
-                        ("F5".into(), "Refresh"),
-                        (format!("{cmd}F"), "Filter the results list"),
-                        (format!("{cmd}N"), "New user, group, shared mailbox or distribution list"),
-                        ("Delete".into(), "Delete the selected item"),
-                        (format!("{cmd}E"), "Enable or disable the selected item"),
-                        (format!("{cmd}P"), "Reset a user's password"),
-                        (format!("{cmd}L"), "Assign a licence"),
-                        (format!("{cmd}G / {cmd}M"), "Add to group / add member"),
-                        (format!("{cmd}R"), "Assign a directory role"),
-                        (format!("{cmd}U"), "Assign the selected licence to a user, or a user or group to the selected application"),
-                        ("Ctrl+Tab / Ctrl+Shift+Tab".into(), "Next / previous tab in a properties sheet"),
-                        ("Insert, Delete, F2".into(), "Add, remove, edit on a properties tab"),
-                        (format!("{cmd}, (comma)"), "Settings"),
-                        (format!("{cmd}+ / {cmd}- / {cmd}0"), "Zoom in / out / reset"),
-                        ("Escape".into(), "Close the dialog"),
-                        (format!("{cmd}Q"), "Exit"),
+                        ("F6 / Shift+F6".into(), "help.panes"),
+                        ("Tab / Shift+Tab".into(), "help.controls"),
+                        ("↑ ↓ PgUp PgDn Home End".into(), "help.selection"),
+                        ("← →".into(), "help.expand"),
+                        ("Enter".into(), "help.properties"),
+                        ("Shift+F10".into(), "help.context_menu"),
+                        ("F10".into(), "help.menu_bar"),
+                        ("F5".into(), "act.refresh"),
+                        (format!("{cmd}F"), "help.filter"),
+                        (format!("{cmd}N"), "help.new"),
+                        ("Delete".into(), "help.delete"),
+                        (format!("{cmd}E"), "help.enable"),
+                        (format!("{cmd}P"), "help.password"),
+                        (format!("{cmd}L"), "help.licence"),
+                        (format!("{cmd}G / {cmd}M"), "help.group"),
+                        (format!("{cmd}R"), "help.role"),
+                        (format!("{cmd}U"), "help.assign"),
+                        ("Ctrl+Tab / Ctrl+Shift+Tab".into(), "help.tabs"),
+                        ("Insert, Delete, F2".into(), "help.tab_ops"),
+                        (format!("{cmd}, (comma)"), "help.settings"),
+                        (format!("{cmd}+ / {cmd}- / {cmd}0"), "help.zoom"),
+                        ("Escape".into(), "help.close"),
+                        (format!("{cmd}Q"), "menu.exit"),
                     ];
                     egui::Grid::new("help").num_columns(2).striped(true).spacing([16.0, 4.0]).show(ui, |ui| {
                         for (k, d) in rows {
                             ui.label(RichText::new(k).monospace());
-                            ui.label(d);
+                            ui.label(t(d));
                             ui.end_row();
                         }
                     });
                     ui.add_space(8.0);
-                    let ok = ui.button("Close");
+                    let ok = ui.button(t("dialog.close"));
                     if first {
                         ok.request_focus();
                     }
@@ -455,26 +458,20 @@ impl App {
                 let mut close = escape;
                 modal.show(ctx, |ui| {
                     ui.set_max_width(560.0);
-                    ui.heading("Update available");
+                    ui.heading(t("update.title"));
                     ui.add_space(6.0);
-                    ui.add(
-                        egui::Label::new(format!(
-                            "Graphical Cloud Management {} is available. You have version {}.",
-                            release.version,
-                            env!("CARGO_PKG_VERSION")
-                        ))
-                        .wrap(),
-                    );
+                    let text = tf("update.available", &[("version", &release.version), ("current", &env!("CARGO_PKG_VERSION"))]);
+                    ui.add(egui::Label::new(text).wrap());
                     if !release.notes.is_empty() {
                         ui.add_space(6.0);
-                        ui.label(RichText::new("What's new").bold());
+                        ui.label(RichText::new(t("update.whats_new")).bold());
                         egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                             ui.add(egui::Label::new(release.notes.as_str()).wrap().selectable(true));
                         });
                     }
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        let download = ui.button("Download…").on_hover_text("Open the release page in your browser");
+                        let download = ui.button(t("update.download")).on_hover_text(t("update.download_tip"));
                         if first {
                             download.request_focus();
                         }
@@ -482,12 +479,12 @@ impl App {
                             ui.ctx().open_url(egui::OpenUrl::new_tab(release.url.as_str()));
                             close = true;
                         }
-                        if ui.button("Skip this version").clicked() {
+                        if ui.button(t("update.skip")).clicked() {
                             let version = release.version.clone();
                             self.skip_version(&version);
                             close = true;
                         }
-                        close |= ui.button("Later").clicked();
+                        close |= ui.button(t("update.later")).clicked();
                     });
                 });
                 !close
@@ -496,13 +493,13 @@ impl App {
                 let mut close = escape;
                 modal.show(ctx, |ui| {
                     ui.heading("Graphical Cloud Management");
-                    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-                    ui.label("A console for managing Microsoft Entra ID through Microsoft Graph.");
-                    ui.label("Free software under the GNU General Public License, version 3 or later.");
+                    ui.label(tf("about.version", &[("version", &env!("CARGO_PKG_VERSION"))]));
+                    ui.label(t("about.summary"));
+                    ui.label(t("about.licence"));
                     ui.add_space(4.0);
-                    ui.label(format!("Settings: {}", crate::config::settings_path().display()));
+                    ui.label(tf("about.settings", &[("path", &crate::config::settings_path().display())]));
                     ui.add_space(8.0);
-                    let ok = ui.button("   OK   ");
+                    let ok = ui.button(format!("   {}   ", t("dialog.ok")));
                     if first {
                         ok.request_focus();
                     }
@@ -583,7 +580,7 @@ impl App {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 submit |= ui.button(format!("  {}  ", form.ok)).clicked();
-                cancel |= ui.button("Cancel").clicked();
+                cancel |= ui.button(t("dialog.cancel")).clicked();
             });
         });
         if cancel {
@@ -591,7 +588,7 @@ impl App {
         }
         if submit && top {
             if let Some(missing) = form.fields.iter().find(|f| f.required && f.value.trim().is_empty()) {
-                form.error = Some(format!("{} is required.", missing.label));
+                form.error = Some(tf("form.required", &[("field", &missing.label)]));
                 return true;
             }
             let cb = form.on_submit.take();
@@ -636,7 +633,7 @@ impl App {
             ui.horizontal(|ui| {
                 let label = ui.label(p.prompt.as_str());
                 let r = ui
-                    .add(egui::TextEdit::singleline(&mut p.query).id(query_id).hint_text("Type to search").desired_width(f32::INFINITY))
+                    .add(egui::TextEdit::singleline(&mut p.query).id(query_id).hint_text(t("picker.hint")).desired_width(f32::INFINITY))
                     .labelled_by(label.id);
                 if first {
                     r.request_focus();
@@ -657,7 +654,7 @@ impl App {
                     } else if let Some(err) = &p.error {
                         ui.colored_label(ui.visuals().error_fg_color, err.as_str());
                     } else if p.items.is_empty() {
-                        ui.label("No matches.");
+                        ui.label(t("picker.no_matches"));
                     }
                     for (i, item) in p.items.iter().enumerate() {
                         let text = if item.detail.is_empty() { item.label.clone() } else { format!("{}  —  {}", item.label, item.detail) };
@@ -675,13 +672,13 @@ impl App {
                 });
             });
             ui.add_space(4.0);
-            ui.label(RichText::new("↑/↓ to choose, Enter to select, Esc to cancel").small().weak());
+            ui.label(RichText::new(t("picker.keys")).small().weak());
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.add_enabled(!p.items.is_empty(), egui::Button::new("  Select  ")).clicked() {
+                if ui.add_enabled(!p.items.is_empty(), egui::Button::new(format!("  {}  ", t("picker.select")))).clicked() {
                     pick = Some(p.sel);
                 }
-                cancel |= ui.button("Cancel").clicked();
+                cancel |= ui.button(t("dialog.cancel")).clicked();
             });
         });
         // Debounced server search.

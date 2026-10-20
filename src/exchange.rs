@@ -9,6 +9,7 @@ use crate::app::App;
 use crate::auth::Api;
 use crate::dialogs::{Dialog, Field, Form, PickItem, Picker};
 use crate::graph::{Graph, MAX_ITEMS};
+use crate::i18n::{t, tf};
 use crate::model::{s, yes_no, Node};
 use crate::ops::civil_from_days;
 use crate::sheets::{table, SheetRow, TabBody, TabKind, TabOp};
@@ -60,7 +61,7 @@ impl Graph {
             .as_array()
             .and_then(|d| d.iter().find(|d| d["isInitial"] == true))
             .map(|d| s(d, "name"))
-            .ok_or_else(|| anyhow!("Could not find the tenant's onmicrosoft.com domain."))?;
+            .ok_or_else(|| anyhow!(t("exchange.no_initial_domain")))?;
         let t = (s(org, "id"), domain);
         let _ = self.exchange_tenant.set(t.clone());
         Ok(t)
@@ -111,19 +112,19 @@ pub fn forwarding(v: &Value) -> String {
 
 pub fn mailbox_type(v: &Value) -> String {
     match s(v, "RecipientTypeDetails").as_str() {
-        "UserMailbox" => "User".into(),
-        "SharedMailbox" => "Shared".into(),
-        "RoomMailbox" => "Room".into(),
-        "EquipmentMailbox" => "Equipment".into(),
+        "UserMailbox" => t("value.mailbox_user"),
+        "SharedMailbox" => t("value.mailbox_shared"),
+        "RoomMailbox" => t("value.mailbox_room"),
+        "EquipmentMailbox" => t("value.mailbox_equipment"),
         other => other.into(),
     }
 }
 
 pub fn group_type(v: &Value) -> String {
     match s(v, "RecipientTypeDetails").as_str() {
-        "MailUniversalDistributionGroup" => "Distribution list".into(),
-        "MailUniversalSecurityGroup" => "Mail-enabled security".into(),
-        "RoomList" => "Room list".into(),
+        "MailUniversalDistributionGroup" => t("value.distribution_list"),
+        "MailUniversalSecurityGroup" => t("value.group_mail_security"),
+        "RoomList" => t("value.room_list"),
         other => other.into(),
     }
 }
@@ -224,7 +225,7 @@ pub fn list(g: &Graph, node: Node) -> Result<(Vec<Value>, bool)> {
     let (rows, more) = match node {
         Node::Mailboxes => g.invoke_capped("Get-Mailbox", json!({ "ResultSize": "Unlimited", "RecipientTypeDetails": MAILBOX_TYPES }))?,
         Node::DistributionLists => g.invoke_capped("Get-DistributionGroup", json!({ "ResultSize": "Unlimited" }))?,
-        _ => bail!("{} is not an Exchange list", node.title()),
+        _ => bail!("{node:?} is not an Exchange list"),
     };
     Ok((rows.into_iter().map(with_id).collect(), more))
 }
@@ -233,24 +234,24 @@ pub fn list(g: &Graph, node: Node) -> Result<(Vec<Value>, bool)> {
 pub fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> Result<(TabBody, Option<Value>)> {
     let id = identity(obj);
     let one = |cmdlet: &str| -> Result<Value> {
-        g.invoke(cmdlet, json!({ "Identity": id }))?.into_iter().next().ok_or_else(|| anyhow!("{id} was not found."))
+        g.invoke(cmdlet, json!({ "Identity": id }))?.into_iter().next().ok_or_else(|| anyhow!(tf("exchange.not_found", &[("name", &id)])))
     };
-    let field = |label: &str, value: String| (label.to_string(), value);
+    let field = |label: &str, value: String| (t(label), value);
     let body = match (node, kind) {
         (Node::Mailboxes, TabKind::General) => {
             let m = with_id(one("Get-Mailbox")?);
             let fields = vec![
-                field("Display name", s(&m, "DisplayName")),
-                field("Email address", s(&m, "PrimarySmtpAddress")),
-                field("Type", mailbox_type(&m)),
-                field("Email addresses", addresses(&m)),
-                field("Alias", s(&m, "Alias")),
-                field("Hidden from address lists", yes_no(&m["HiddenFromAddressListsEnabled"])),
-                field("Forwarding to", forwarding(&m)),
-                field("Keep a copy when forwarding", yes_no(&m["DeliverToMailboxAndForward"])),
-                field("Archive", s(&m, "ArchiveStatus")),
-                field("Litigation hold", yes_no(&m["LitigationHoldEnabled"])),
-                field("Object ID", s(&m, "ExternalDirectoryObjectId")),
+                field("prop.display_name", s(&m, "DisplayName")),
+                field("prop.email_address", s(&m, "PrimarySmtpAddress")),
+                field("prop.type", mailbox_type(&m)),
+                field("prop.email_addresses", addresses(&m)),
+                field("prop.alias", s(&m, "Alias")),
+                field("prop.hidden", yes_no(&m["HiddenFromAddressListsEnabled"])),
+                field("prop.forwarding_to", forwarding(&m)),
+                field("prop.keep_copy", yes_no(&m["DeliverToMailboxAndForward"])),
+                field("prop.archive", s(&m, "ArchiveStatus")),
+                field("prop.litigation_hold", yes_no(&m["LitigationHoldEnabled"])),
+                field("prop.object_id", s(&m, "ExternalDirectoryObjectId")),
             ];
             return Ok((TabBody::Fields(fields), Some(m)));
         }
@@ -258,20 +259,20 @@ pub fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> Result<(Ta
         (Node::Mailboxes, TabKind::AutoReplies) => {
             let c = one("Get-MailboxAutoReplyConfiguration")?;
             let state = s(&c, "AutoReplyState");
-            let mut fields = vec![field("Automatic replies", match state.as_str() {
-                "Enabled" => "On".into(),
-                "Scheduled" => "On, between the times below".into(),
-                "Disabled" => "Off".into(),
+            let mut fields = vec![field("tab.auto_replies", match state.as_str() {
+                "Enabled" => t("replies.on"),
+                "Scheduled" => t("replies.scheduled_below"),
+                "Disabled" => t("replies.off"),
                 _ => state.clone(),
             })];
             if state == "Scheduled" {
-                fields.push(field("Start", exo_time(&c["StartTime"])));
-                fields.push(field("End", exo_time(&c["EndTime"])));
+                fields.push(field("replies.start", exo_time(&c["StartTime"])));
+                fields.push(field("replies.end", exo_time(&c["EndTime"])));
             }
-            fields.push(field("Reply inside the organisation", html_text(&s(&c, "InternalMessage"))));
-            fields.push(field("Reply outside the organisation", match s(&c, "ExternalAudience").as_str() {
-                "None" => "Don't reply".into(),
-                "Known" => format!("Only to senders in the mailbox's contacts: {}", html_text(&s(&c, "ExternalMessage"))),
+            fields.push(field("replies.inside", html_text(&s(&c, "InternalMessage"))));
+            fields.push(field("replies.outside", match s(&c, "ExternalAudience").as_str() {
+                "None" => t("replies.dont_reply"),
+                "Known" => tf("replies.known_only", &[("message", &html_text(&s(&c, "ExternalMessage")))]),
                 _ => html_text(&s(&c, "ExternalMessage")),
             }));
             TabBody::Fields(fields)
@@ -279,21 +280,21 @@ pub fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> Result<(Ta
         (Node::DistributionLists, TabKind::General) => {
             let d = with_id(one("Get-DistributionGroup")?);
             let fields = vec![
-                field("Display name", s(&d, "DisplayName")),
-                field("Email address", s(&d, "PrimarySmtpAddress")),
-                field("Type", group_type(&d)),
-                field("Email addresses", addresses(&d)),
-                field("Alias", s(&d, "Alias")),
-                field("Only people in the organisation can send to it", yes_no(&d["RequireSenderAuthenticationEnabled"])),
-                field("Hidden from address lists", yes_no(&d["HiddenFromAddressListsEnabled"])),
-                field("Owners", list_text(&d["ManagedBy"])),
-                field("Object ID", s(&d, "ExternalDirectoryObjectId")),
+                field("prop.display_name", s(&d, "DisplayName")),
+                field("prop.email_address", s(&d, "PrimarySmtpAddress")),
+                field("prop.type", group_type(&d)),
+                field("prop.email_addresses", addresses(&d)),
+                field("prop.alias", s(&d, "Alias")),
+                field("prop.internal_only", yes_no(&d["RequireSenderAuthenticationEnabled"])),
+                field("prop.hidden", yes_no(&d["HiddenFromAddressListsEnabled"])),
+                field("prop.owners", list_text(&d["ManagedBy"])),
+                field("prop.object_id", s(&d, "ExternalDirectoryObjectId")),
             ];
             return Ok((TabBody::Fields(fields), Some(d)));
         }
         (Node::DistributionLists, TabKind::ListMembers) => {
             let items = g.invoke("Get-DistributionGroupMember", json!({ "Identity": id, "ResultSize": "Unlimited" }))?;
-            table(vec!["Name", "Email address", "Type"], items, |v| {
+            table(vec!["col.name", "col.email_address", "col.type"], items, |v| {
                 vec![s(v, "DisplayName"), s(v, "PrimarySmtpAddress"), s(v, "RecipientTypeDetails")]
             })
         }
@@ -308,28 +309,28 @@ fn mailbox_permissions(g: &Graph, id: &str) -> Result<TabBody> {
     let mut rows = Vec::new();
     let mut add = |who: String, kind: &str, label: &str| {
         let data = json!({ "user": who, "kind": kind });
-        rows.push(SheetRow { cells: vec![who, label.into()], data });
+        rows.push(SheetRow { cells: vec![who, t(label)], data });
     };
     for p in g.invoke("Get-MailboxPermission", json!({ "Identity": id }))? {
         let who = s(&p, "User");
         if p["IsInherited"] != true && p["Deny"] != true && p["AccessRights"].to_string().contains("FullAccess") && !is_system_account(&who) {
-            add(who, "full", "Full Access");
+            add(who, "full", "exchange.full_access");
         }
     }
     for p in g.invoke("Get-RecipientPermission", json!({ "Identity": id }))? {
         let who = s(&p, "Trustee");
         if p["IsInherited"] != true && s(&p, "AccessControlType") != "Deny" && p["AccessRights"].to_string().contains("SendAs") && !is_system_account(&who) {
-            add(who, "sendas", "Send As");
+            add(who, "sendas", "exchange.send_as");
         }
     }
     let mailbox = g.invoke("Get-Mailbox", json!({ "Identity": id }))?;
     for who in mailbox.first().and_then(|m| m["GrantSendOnBehalfTo"].as_array()).map(Vec::as_slice).unwrap_or_default() {
         if let Some(who) = who.as_str() {
-            add(who.to_string(), "behalf", "Send on behalf");
+            add(who.to_string(), "behalf", "exchange.send_on_behalf");
         }
     }
     rows.sort_by_cached_key(|r| (r.cells[0].to_lowercase(), r.cells[1].clone()));
-    Ok(TabBody::Table { headers: vec!["User", "Permission"], rows })
+    Ok(TabBody::Table { headers: vec!["col.user", "col.permission"], rows })
 }
 
 impl App {
@@ -337,17 +338,17 @@ impl App {
     fn domain_field(&self) -> Field {
         let domains: Vec<(String, String)> = self.domains.iter().map(|d| (d.clone(), format!("@{d}"))).collect();
         if domains.is_empty() {
-            Field::text("domain", "Domain", "")
+            Field::text("domain", &t("field.domain"), "")
         } else {
-            Field::choice("domain", "Domain", domains, 0)
+            Field::choice("domain", &t("field.domain"), domains, 0)
         }
     }
 
     pub fn new_shared_mailbox(&mut self) {
-        let form = Form::new("New shared mailbox", "Create")
-            .intro("A shared mailbox doesn't need a licence while it is under 50 GB. Give people access to it on its Mailbox permissions tab.")
-            .field(Field::text("name", "Display name", "").required())
-            .field(Field::text("alias", "Email name", "").required())
+        let form = Form::new(&t("exchange.new_mailbox_title"), &t("dialog.create"))
+            .intro(&t("exchange.new_mailbox_intro"))
+            .field(Field::text("name", &t("field.display_name"), "").required())
+            .field(Field::text("alias", &t("field.email_name"), "").required())
             .field(self.domain_field())
             .on_submit(|app, f| {
                 let (name, address) = new_address(f)?;
@@ -358,16 +359,16 @@ impl App {
                     "Alias": f.text("alias"),
                     "PrimarySmtpAddress": address,
                 });
-                app.spawn("Creating shared mailbox…", move |g| g.invoke("New-Mailbox", params), move |app, r| match r {
+                app.spawn(t("exchange.creating_mailbox"), move |g| g.invoke("New-Mailbox", params), move |app, r| match r {
                     Ok(made) => {
-                        app.status = format!("Created shared mailbox {address}");
+                        app.status = tf("exchange.created_mailbox", &[("address", &address)]);
                         if let Some(m) = made.into_iter().next() {
                             app.upsert(Node::Mailboxes, with_id(m));
                         } else {
                             app.load(Node::Mailboxes);
                         }
                     }
-                    Err(e) => app.error("New shared mailbox", e),
+                    Err(e) => app.error(&t("exchange.new_mailbox_title"), e),
                 });
                 Ok(())
             });
@@ -376,15 +377,15 @@ impl App {
 
     pub fn new_distribution_list(&mut self) {
         let types = vec![
-            ("Distribution".to_string(), "Distribution list".to_string()),
-            ("Security".to_string(), "Mail-enabled security group".to_string()),
+            ("Distribution".to_string(), t("value.distribution_list")),
+            ("Security".to_string(), t("value.mail_security_group")),
         ];
-        let form = Form::new("New distribution list", "Create")
-            .field(Field::choice("type", "Type", types, 0))
-            .field(Field::text("name", "Display name", "").required())
-            .field(Field::text("alias", "Email name", "").required())
+        let form = Form::new(&t("exchange.new_list_title"), &t("dialog.create"))
+            .field(Field::choice("type", &t("field.type"), types, 0))
+            .field(Field::text("name", &t("field.display_name"), "").required())
+            .field(Field::text("alias", &t("field.email_name"), "").required())
             .field(self.domain_field())
-            .field(Field::check("internal", "Only people in the organisation can send to it", true))
+            .field(Field::check("internal", &t("prop.internal_only"), true))
             .on_submit(|app, f| {
                 let (name, address) = new_address(f)?;
                 let params = json!({
@@ -395,16 +396,16 @@ impl App {
                     "PrimarySmtpAddress": address,
                     "RequireSenderAuthenticationEnabled": f.checked("internal"),
                 });
-                app.spawn("Creating distribution list…", move |g| g.invoke("New-DistributionGroup", params), move |app, r| match r {
+                app.spawn(t("exchange.creating_list"), move |g| g.invoke("New-DistributionGroup", params), move |app, r| match r {
                     Ok(made) => {
-                        app.status = format!("Created distribution list {address}");
+                        app.status = tf("exchange.created_list", &[("address", &address)]);
                         if let Some(d) = made.into_iter().next() {
                             app.upsert(Node::DistributionLists, with_id(d));
                         } else {
                             app.load(Node::DistributionLists);
                         }
                     }
-                    Err(e) => app.error("New distribution list", e),
+                    Err(e) => app.error(&t("exchange.new_list_title"), e),
                 });
                 Ok(())
             });
@@ -414,15 +415,12 @@ impl App {
     /// Display name, address-list visibility and forwarding of a mailbox.
     pub fn edit_mailbox(&mut self, obj: Value, after: impl Fn(&mut App) + Clone + Send + 'static) {
         let current = forwarding(&obj);
-        let form = Form::new(&format!("Edit {}", s(&obj, "DisplayName")), "Save")
-            .intro(
-                "Leave \"Forward email to\" blank to stop forwarding. Forwarding to an address outside the \
-                 organisation only works if the outbound spam policy allows it.",
-            )
-            .field(Field::text("DisplayName", "Display name", &s(&obj, "DisplayName")).required())
-            .field(Field::check("HiddenFromAddressListsEnabled", "Hide from address lists", obj["HiddenFromAddressListsEnabled"] == true))
-            .field(Field::text("forward", "Forward email to", &current))
-            .field(Field::check("DeliverToMailboxAndForward", "Keep a copy in the mailbox when forwarding", obj["DeliverToMailboxAndForward"] == true))
+        let form = Form::new(&tf("sheet.edit_title", &[("name", &s(&obj, "DisplayName"))]), &t("dialog.save"))
+            .intro(&t("exchange.forward_intro"))
+            .field(Field::text("DisplayName", &t("field.display_name"), &s(&obj, "DisplayName")).required())
+            .field(Field::check("HiddenFromAddressListsEnabled", &t("field.hide"), obj["HiddenFromAddressListsEnabled"] == true))
+            .field(Field::text("forward", &t("field.forward_to"), &current))
+            .field(Field::check("DeliverToMailboxAndForward", &t("field.keep_copy"), obj["DeliverToMailboxAndForward"] == true))
             .on_submit(move |app, f| {
                 let mut params = json!({ "Identity": identity(&obj) });
                 if f.text("DisplayName") != s(&obj, "DisplayName") {
@@ -436,7 +434,7 @@ impl App {
                 let forward = f.text("forward");
                 if forward != current {
                     if !forward.is_empty() && (!forward.contains('@') || forward.contains(' ')) {
-                        return Err("Enter the email address to forward to, such as ann@contoso.com.".into());
+                        return Err(t("exchange.bad_forward"));
                     }
                     // Forwarding is set one way or the other, so clear the other way.
                     params["ForwardingAddress"] = Value::Null;
@@ -448,7 +446,7 @@ impl App {
                 }
                 updated["id"] = obj["id"].clone();
                 let after = after.clone();
-                app.mutate("Save mailbox", move |g| g.invoke("Set-Mailbox", params).map(|_| ()), move |app| {
+                app.mutate(&t("task.save_mailbox"), move |g| g.invoke("Set-Mailbox", params).map(|_| ()), move |app| {
                     app.upsert(Node::Mailboxes, updated);
                     after(app);
                 });
@@ -462,36 +460,36 @@ impl App {
         let name = s(&obj, "DisplayName");
         let get = id.clone();
         self.spawn(
-            "Loading automatic replies…",
+            tf("status.loading_tab", &[("tab", &t("tab.auto_replies"))]),
             move |g| g.invoke("Get-MailboxAutoReplyConfiguration", json!({ "Identity": get })),
             move |app, r| match r {
                 Ok(c) => app.auto_replies_form(id, &name, c.into_iter().next().unwrap_or_default(), after),
-                Err(e) => app.error("Automatic replies", e),
+                Err(e) => app.error(&t("tab.auto_replies"), e),
             },
         );
     }
 
     fn auto_replies_form(&mut self, id: String, name: &str, c: Value, after: impl Fn(&mut App) + Clone + Send + 'static) {
-        let opts = |list: &[(&str, &str)]| list.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect::<Vec<_>>();
-        let states = opts(&[("Disabled", "Off"), ("Enabled", "On"), ("Scheduled", "On, between these times")]);
+        let opts = |list: &[(&str, &str)]| list.iter().map(|(v, l)| (v.to_string(), t(l))).collect::<Vec<_>>();
+        let states = opts(&[("Disabled", "replies.off"), ("Enabled", "replies.on"), ("Scheduled", "replies.scheduled")]);
         let audiences = opts(&[
-            ("All", "Reply to everyone"),
-            ("Known", "Reply only to senders in the mailbox's contacts"),
-            ("None", "Don't reply"),
+            ("All", "replies.everyone"),
+            ("Known", "replies.known"),
+            ("None", "replies.dont_reply"),
         ]);
         let pos = |list: &[(String, String)], v: String| list.iter().position(|o| o.0 == v).unwrap_or(0);
         let state = pos(&states, s(&c, "AutoReplyState"));
         let audience = pos(&audiences, s(&c, "ExternalAudience"));
         let internal = html_text(&s(&c, "InternalMessage"));
         let external = html_text(&s(&c, "ExternalMessage"));
-        let form = Form::new(&format!("Automatic replies — {name}"), "Save")
-            .intro("Times are in UTC, written as 2026-12-24 17:00.")
-            .field(Field::choice("state", "Automatic replies", states, state))
-            .field(Field::text("start", "Start", &exo_time(&c["StartTime"])))
-            .field(Field::text("end", "End", &exo_time(&c["EndTime"])))
-            .field(Field::multiline("internal", "Reply inside the organisation", &internal))
-            .field(Field::choice("audience", "Outside the organisation", audiences, audience))
-            .field(Field::multiline("external", "Reply outside the organisation", &external))
+        let form = Form::new(&tf("replies.title", &[("name", &name)]), &t("dialog.save"))
+            .intro(&t("replies.intro"))
+            .field(Field::choice("state", &t("tab.auto_replies"), states, state))
+            .field(Field::text("start", &t("replies.start"), &exo_time(&c["StartTime"])))
+            .field(Field::text("end", &t("replies.end"), &exo_time(&c["EndTime"])))
+            .field(Field::multiline("internal", &t("replies.inside"), &internal))
+            .field(Field::choice("audience", &t("replies.audience"), audiences, audience))
+            .field(Field::multiline("external", &t("replies.outside"), &external))
             .on_submit(move |app, f| {
                 let mut params = json!({
                     "Identity": id,
@@ -507,15 +505,15 @@ impl App {
                 }
                 if f.choice("state") == "Scheduled" {
                     let (Some(start), Some(end)) = (parse_time(&f.text("start")), parse_time(&f.text("end"))) else {
-                        return Err("Enter the start and end as a date and time, such as 2026-12-24 17:00.".into());
+                        return Err(t("replies.bad_times"));
                     };
                     if end <= start {
-                        return Err("The end must be after the start.".into());
+                        return Err(t("replies.end_before_start"));
                     }
                     params["StartTime"] = json!(start);
                     params["EndTime"] = json!(end);
                 }
-                app.mutate("Save automatic replies", move |g| g.invoke("Set-MailboxAutoReplyConfiguration", params).map(|_| ()), after.clone());
+                app.mutate(&t("task.save_replies"), move |g| g.invoke("Set-MailboxAutoReplyConfiguration", params).map(|_| ()), after.clone());
                 Ok(())
             });
         self.push(Dialog::Form(form));
@@ -525,32 +523,19 @@ impl App {
         let kind = s(&obj, "RecipientTypeDetails");
         let name = s(&obj, "DisplayName");
         let (to, text) = match kind.as_str() {
-            "UserMailbox" => (
-                "Shared",
-                format!(
-                    "Convert {name} to a shared mailbox? Its account can no longer sign in, and people with \
-                     Full Access open it from their own mailbox. Under 50 GB it doesn't need a licence, so \
-                     you can remove the user's licence afterwards."
-                ),
-            ),
-            "SharedMailbox" => (
-                "Regular",
-                format!(
-                    "Convert {name} to a user mailbox? Its user needs a licence that includes Exchange Online \
-                     within 30 days, and a password and an enabled account to sign in."
-                ),
-            ),
+            "UserMailbox" => ("Shared", tf("exchange.convert_to_shared", &[("name", &name)])),
+            "SharedMailbox" => ("Regular", tf("exchange.convert_to_user", &[("name", &name)])),
             _ => {
-                self.push(Dialog::message("Convert mailbox", "Only user and shared mailboxes can be converted."));
+                self.push(Dialog::message(&t("exchange.convert_title"), &t("exchange.convert_only")));
                 return;
             }
         };
         let id = identity(&obj);
         let oid = obj["id"].clone();
         let new_kind = if to == "Shared" { "SharedMailbox" } else { "UserMailbox" };
-        self.push(Dialog::confirm("Convert mailbox", &text, move |app| {
+        self.push(Dialog::confirm(&t("exchange.convert_title"), &text, move |app| {
             app.mutate(
-                &format!("Convert {name}"),
+                &tf("task.convert", &[("name", &name)]),
                 move |g| g.invoke("Set-Mailbox", json!({ "Identity": id, "Type": to })).map(|_| ()),
                 move |app| app.upsert(Node::Mailboxes, json!({ "id": oid, "RecipientTypeDetails": new_kind })),
             );
@@ -561,40 +546,41 @@ impl App {
         let name = s(&obj, "DisplayName");
         let (cmdlet, params, text) = match node {
             Node::Mailboxes if s(&obj, "RecipientTypeDetails") == "UserMailbox" => {
-                self.push(Dialog::message(
-                    "Delete mailbox",
-                    "A user's mailbox goes with the user: delete the user under Users, or remove their \
-                     Exchange Online licence. To keep the email, convert it to a shared mailbox first.",
-                ));
+                self.push(Dialog::message(&t("exchange.delete_mailbox_title"), &t("exchange.delete_user_mailbox")));
                 return;
             }
-            Node::Mailboxes => (
-                "Remove-Mailbox",
-                json!({ "Identity": identity(&obj), "Confirm": false }),
-                format!("Delete the {} mailbox '{name}' and its email? It can be restored for 30 days.", mailbox_type(&obj).to_lowercase()),
-            ),
+            Node::Mailboxes => {
+                let key = match s(&obj, "RecipientTypeDetails").as_str() {
+                    "SharedMailbox" => "exchange.delete_shared_mailbox",
+                    "RoomMailbox" => "exchange.delete_room_mailbox",
+                    "EquipmentMailbox" => "exchange.delete_equipment_mailbox",
+                    _ => "exchange.delete_mailbox",
+                };
+                ("Remove-Mailbox", json!({ "Identity": identity(&obj), "Confirm": false }), tf(key, &[("name", &name)]))
+            }
             Node::DistributionLists => (
                 "Remove-DistributionGroup",
                 json!({ "Identity": identity(&obj), "BypassSecurityGroupManagerCheck": true, "Confirm": false }),
-                format!("Delete the distribution list '{name}'? This cannot be undone."),
+                tf("exchange.delete_list", &[("name", &name)]),
             ),
             _ => return,
         };
         let id = s(&obj, "id");
-        self.push(Dialog::confirm(&format!("Delete {}", node.noun()), &text, move |app| {
-            app.mutate(&format!("Delete {name}"), move |g| g.invoke(cmdlet, params).map(|_| ()), move |app| app.remove_obj(node, &id));
+        let title = t(if node == Node::Mailboxes { "exchange.delete_mailbox_title" } else { "exchange.delete_list_title" });
+        self.push(Dialog::confirm(&title, &text, move |app| {
+            app.mutate(&tf("task.delete", &[("name", &name)]), move |g| g.invoke(cmdlet, params).map(|_| ()), move |app| app.remove_obj(node, &id));
         }));
     }
 
     pub fn edit_distribution_list(&mut self, obj: Value, after: impl Fn(&mut App) + Clone + Send + 'static) {
-        let form = Form::new(&format!("Edit {}", s(&obj, "DisplayName")), "Save")
-            .field(Field::text("DisplayName", "Display name", &s(&obj, "DisplayName")).required())
+        let form = Form::new(&tf("sheet.edit_title", &[("name", &s(&obj, "DisplayName"))]), &t("dialog.save"))
+            .field(Field::text("DisplayName", &t("field.display_name"), &s(&obj, "DisplayName")).required())
             .field(Field::check(
                 "RequireSenderAuthenticationEnabled",
-                "Only people in the organisation can send to it",
+                &t("prop.internal_only"),
                 obj["RequireSenderAuthenticationEnabled"] == true,
             ))
-            .field(Field::check("HiddenFromAddressListsEnabled", "Hide from address lists", obj["HiddenFromAddressListsEnabled"] == true))
+            .field(Field::check("HiddenFromAddressListsEnabled", &t("field.hide"), obj["HiddenFromAddressListsEnabled"] == true))
             .on_submit(move |app, f| {
                 let mut changes = json!({});
                 if f.text("DisplayName") != s(&obj, "DisplayName") {
@@ -610,7 +596,7 @@ impl App {
                 params["BypassSecurityGroupManagerCheck"] = json!(true);
                 changes["id"] = obj["id"].clone();
                 let after = after.clone();
-                app.mutate("Save distribution list", move |g| g.invoke("Set-DistributionGroup", params).map(|_| ()), move |app| {
+                app.mutate(&t("task.save_list"), move |g| g.invoke("Set-DistributionGroup", params).map(|_| ()), move |app| {
                     app.upsert(Node::DistributionLists, changes);
                     after(app);
                 });
@@ -621,33 +607,33 @@ impl App {
 
     pub fn add_list_member(&mut self, obj: Value, after: impl FnOnce(&mut App) + Send + 'static) {
         let id = identity(&obj);
-        self.pick_user_or_group(&format!("Add member to {}", s(&obj, "DisplayName")), move |app, m| {
+        self.pick_user_or_group(&tf("pick.add_member_to", &[("name", &s(&obj, "DisplayName"))]), move |app, m| {
             // The user principal name or group email address.
             let member = m.detail.clone();
             if member.is_empty() {
                 let who = m.label.trim_start_matches(['👤', '👥', ' ']);
-                app.push(Dialog::message("Add member", &format!("{who} has no email address, so it can't be added to a distribution list.")));
+                app.push(Dialog::message(&t("task.add_member"), &tf("exchange.no_address", &[("name", &who)])));
                 return;
             }
             let params = json!({ "Identity": id, "Member": member, "BypassSecurityGroupManagerCheck": true });
-            app.mutate("Add member", move |g| g.invoke("Add-DistributionGroupMember", params).map(|_| ()), after);
+            app.mutate(&t("task.add_member"), move |g| g.invoke("Add-DistributionGroupMember", params).map(|_| ()), after);
         });
     }
 
     fn add_mailbox_permission(&mut self, obj: Value, after: impl FnOnce(&mut App) + Send + 'static) {
         let id = identity(&obj);
         let name = s(&obj, "DisplayName");
-        self.pick_user(&format!("Give a user access to {name}"), move |app, u| {
+        self.pick_user(&tf("exchange.give_access", &[("name", &name)]), move |app, u| {
             let who = u.detail.clone();
-            let item = |id: &str, label: &str, detail: &str| PickItem { id: id.into(), label: label.into(), detail: detail.into() };
+            let item = |id: &str, label: &str, detail: &str| PickItem { id: id.into(), label: t(label), detail: t(detail) };
             let options = vec![
-                item("full", "Full Access", "Open the mailbox and read, send and delete its email"),
-                item("sendas", "Send As", "Send email that appears to come from the mailbox"),
-                item("behalf", "Send on behalf", "Send email shown as sent on behalf of the mailbox"),
+                item("full", "exchange.full_access", "exchange.full_access_about"),
+                item("sendas", "exchange.send_as", "exchange.send_as_about"),
+                item("behalf", "exchange.send_on_behalf", "exchange.send_on_behalf_about"),
             ];
-            let title = format!("Permission for {}", u.label.trim_start_matches(['👤', ' ']));
+            let title = tf("exchange.permission_for", &[("name", &u.label.trim_start_matches(['👤', ' ']))]);
             let fetch = move |_: &Graph, _: &str| Ok(options.clone());
-            app.push(Dialog::Picker(Picker::new(&title, "Permission:", false, fetch, move |app, p| {
+            app.push(Dialog::Picker(Picker::new(&title, &t("exchange.permission"), false, fetch, move |app, p| {
                 let (cmdlet, params) = match p.id.as_str() {
                     "full" => (
                         "Add-MailboxPermission",
@@ -659,7 +645,7 @@ impl App {
                     ),
                     _ => ("Set-Mailbox", json!({ "Identity": id, "GrantSendOnBehalfTo": add_remove("Add", &who) })),
                 };
-                app.mutate(&format!("Give {}", p.label), move |g| g.invoke(cmdlet, params).map(|_| ()), after);
+                app.mutate(&tf("task.give", &[("permission", &p.label)]), move |g| g.invoke(cmdlet, params).map(|_| ()), after);
             })));
         });
     }
@@ -682,26 +668,26 @@ impl App {
                     "full" => (
                         "Remove-MailboxPermission",
                         json!({ "Identity": id, "User": who, "AccessRights": ["FullAccess"], "InheritanceType": "All", "Confirm": false }),
-                        "Full Access",
+                        "exchange.full_access",
                     ),
                     "sendas" => (
                         "Remove-RecipientPermission",
                         json!({ "Identity": id, "Trustee": who, "AccessRights": ["SendAs"], "Confirm": false }),
-                        "Send As",
+                        "exchange.send_as",
                     ),
-                    _ => ("Set-Mailbox", json!({ "Identity": id, "GrantSendOnBehalfTo": add_remove("Remove", &who) }), "Send on behalf"),
+                    _ => ("Set-Mailbox", json!({ "Identity": id, "GrantSendOnBehalfTo": add_remove("Remove", &who) }), "exchange.send_on_behalf"),
                 };
-                let text = format!("Remove {who}'s {label} permission on {name}?");
-                self.push(Dialog::confirm("Remove permission", &text, move |app| {
-                    app.mutate("Remove permission", move |g| g.invoke(cmdlet, params).map(|_| ()), reload);
+                let text = tf("exchange.remove_permission", &[("permission", &t(label)), ("user", &who), ("name", &name)]);
+                self.push(Dialog::confirm(&t("sheet.remove_permission"), &text, move |app| {
+                    app.mutate(&t("sheet.remove_permission"), move |g| g.invoke(cmdlet, params).map(|_| ()), reload);
                 }));
             }
             (TabKind::ListMembers, TabOp::Remove) => {
                 let Some(row) = row else { return };
                 let params = json!({ "Identity": id, "Member": identity(&row), "BypassSecurityGroupManagerCheck": true, "Confirm": false });
-                let text = format!("Remove '{}' from {name}?", s(&row, "DisplayName"));
-                self.push(Dialog::confirm("Remove member", &text, move |app| {
-                    app.mutate("Remove member", move |g| g.invoke("Remove-DistributionGroupMember", params).map(|_| ()), reload);
+                let text = tf("sheet.remove_assignment_question", &[("member", &s(&row, "DisplayName")), ("name", &name)]);
+                self.push(Dialog::confirm(&t("sheet.remove_member"), &text, move |app| {
+                    app.mutate(&t("sheet.remove_member"), move |g| g.invoke("Remove-DistributionGroupMember", params).map(|_| ()), reload);
                 }));
             }
             _ => {}
@@ -713,14 +699,14 @@ impl App {
 fn new_address(f: &Form) -> Result<(String, String), String> {
     let alias = f.text("alias");
     if alias.contains('@') || alias.contains(' ') {
-        return Err("Email name must not contain spaces or @; choose the domain separately.".into());
+        return Err(t("exchange.bad_alias"));
     }
     let domain = match f.choice("domain") {
         d if !d.is_empty() => d,
         _ => f.text("domain"),
     };
     if domain.is_empty() {
-        return Err("Domain is required.".into());
+        return Err(tf("form.required", &[("field", &t("field.domain"))]));
     }
     Ok((f.text("name"), format!("{alias}@{domain}")))
 }

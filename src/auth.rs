@@ -1,6 +1,7 @@
 //! OAuth 2.0 device authorisation grant against the Microsoft identity platform.
 
 use crate::config::{token_path, Settings};
+use crate::i18n::{t, tf};
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -24,14 +25,10 @@ pub struct NeedsConsent(pub Api);
 
 impl std::fmt::Display for NeedsConsent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            Api::Exchange => f.write_str(
-                "This app has not been granted the Exchange.Manage permission on Office 365 Exchange Online, \
-                 which managing Exchange needs. An administrator can add it to the app registration's API \
-                 permissions and grant admin consent.",
-            ),
-            Api::Graph => f.write_str("This app has not been granted the Microsoft Graph permissions it asks for."),
-        }
+        f.write_str(&t(match self.0 {
+            Api::Exchange => "auth.needs_exchange",
+            Api::Graph => "auth.needs_graph",
+        }))
     }
 }
 
@@ -44,13 +41,7 @@ pub struct NeedsScopes(pub Vec<String>);
 
 impl std::fmt::Display for NeedsScopes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "This needs Microsoft Graph permissions that haven't been granted to this app: {}. An administrator \
-             can approve them by signing in when asked, or by adding them to the app registration's API \
-             permissions and granting admin consent.",
-            self.0.join(", ")
-        )
+        f.write_str(&tf("auth.needs_scopes", &[("scopes", &self.0.join(", "))]))
     }
 }
 
@@ -210,11 +201,11 @@ impl Auth {
             thread::sleep(interval);
             if dc.cancelled.load(Ordering::SeqCst) {
                 log::info!("Device code sign-in cancelled");
-                bail!("The sign-in was cancelled.");
+                bail!(t("auth.cancelled"));
             }
             if Instant::now() > deadline {
                 log::warn!("Device code expired before sign-in completed");
-                bail!("The sign-in code expired. Choose File > Sign in to try again.");
+                bail!(t("auth.expired"));
             }
             let resp = self
                 .http
@@ -228,7 +219,7 @@ impl Auth {
             if resp.status().is_success() {
                 if dc.cancelled.load(Ordering::SeqCst) {
                     log::info!("Device code sign-in completed after it was cancelled; not using it");
-                    bail!("The sign-in was cancelled.");
+                    bail!(t("auth.cancelled"));
                 }
                 let tr = resp.json()?;
                 // Whoever signed in may not be who was signed in before, so access tokens for
@@ -276,7 +267,7 @@ impl Auth {
             if !sign_in_rejected(&text) {
                 // An outage or throttling: the refresh token may still be good, so keep it.
                 log::warn!("Token refresh failed with {status}; keeping the cached sign-in: {text}");
-                bail!("Could not refresh the sign-in ({status}): {}", describe_error(text));
+                bail!(tf("auth.refresh_failed", &[("status", &status), ("error", &describe_error(text))]));
             }
             if api != Api::Graph {
                 // The sign-in itself is fine; it just hasn't been granted this API.
@@ -307,7 +298,7 @@ impl Auth {
     /// Returns true when they were granted (and adds them), or false when they need consent,
     /// leaving the sign-in as it was.
     pub fn try_add_scopes(&self, extra: &[String]) -> Result<bool> {
-        let rt = self.tokens.lock().unwrap().refresh_token.clone().ok_or_else(|| anyhow!("Not signed in."))?;
+        let rt = self.tokens.lock().unwrap().refresh_token.clone().ok_or_else(|| anyhow!(t("auth.not_signed_in")))?;
         let scopes = self.scopes_with(Api::Graph, extra);
         log::debug!("Asking for more scopes: [{}]", extra.join(" "));
         let resp = self
@@ -328,7 +319,7 @@ impl Auth {
                 return Ok(false);
             }
             log::warn!("Asking for more scopes failed with {status}: {text}");
-            bail!("Could not ask for more permissions ({status}): {}", describe_error(text));
+            bail!(tf("auth.more_failed", &[("status", &status), ("error", &describe_error(text))]));
         }
         self.store(Api::Graph, resp.json()?);
         self.add_scopes(extra);
@@ -379,7 +370,7 @@ impl Auth {
                 }
             t.refresh_token.clone()
         };
-        let rt = refresh_token.ok_or_else(|| anyhow!("Not signed in. Choose File > Sign in."))?;
+        let rt = refresh_token.ok_or_else(|| anyhow!(t("auth.not_signed_in")))?;
         self.refresh(api, &rt)?;
         self.tokens
             .lock()

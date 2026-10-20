@@ -6,6 +6,14 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 
 ## [Unreleased]
 
+### Added
+
+- **Language:** the app can be shown in about 30 languages, including Welsh, Irish, French, German,
+  Spanish, Polish and Ukrainian, from **File › Language…**. It is translated on your computer by a
+  local AI model in Ollama, so nothing is sent over the internet. Each translation is saved as a
+  file you can correct or share, and anything not yet translated is shown in English. CSV and
+  database exports of a list stay in English, so they read the same whatever the language.
+
 ### Changed
 
 - Smaller macOS and Linux downloads: the program no longer includes its symbol table, as on

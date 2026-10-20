@@ -3,6 +3,7 @@
 use crate::app::App;
 use crate::dialogs::{Dialog, Field, Form};
 use crate::graph::Graph;
+use crate::i18n::{t, tf};
 use crate::model::{self, general_fields, s, sku_name, Node};
 use crate::ops::{collection, DEFAULT_ACCESS_ROLE};
 use crate::app::Bold;
@@ -35,27 +36,26 @@ pub enum TabKind {
 }
 
 impl TabKind {
-    pub fn title(self) -> &'static str {
-        match self {
-            TabKind::General => "General",
-            TabKind::MemberOf => "Member of",
-            TabKind::UserLicences | TabKind::GroupLicences => "Licences",
-            TabKind::Roles => "Directory roles",
-            TabKind::Members => "Members",
-            TabKind::Owners => "Owners",
-            TabKind::RegisteredOwners => "Registered owners",
-            TabKind::RegisteredUsers => "Registered users",
-            TabKind::ServicePlans => "Service plans",
-            TabKind::LicensedUsers => "Licensed users",
-            TabKind::AppUsers => "Users and groups",
-            TabKind::Permissions => "Permissions",
-            TabKind::MailboxAccess => "Mailbox permissions",
-            TabKind::AutoReplies => "Automatic replies",
-            TabKind::ListMembers => "Members",
-            TabKind::Security => "Authentication & security",
-            TabKind::AuthMethods => "Authentication methods",
-            TabKind::SignIns => "Sign-ins",
-        }
+    pub fn title(self) -> String {
+        t(match self {
+            TabKind::General => "tab.general",
+            TabKind::MemberOf => "tab.member_of",
+            TabKind::UserLicences | TabKind::GroupLicences => "tab.licences",
+            TabKind::Roles => "tab.roles",
+            TabKind::Members | TabKind::ListMembers => "tab.members",
+            TabKind::Owners => "tab.owners",
+            TabKind::RegisteredOwners => "tab.registered_owners",
+            TabKind::RegisteredUsers => "tab.registered_users",
+            TabKind::ServicePlans => "tab.service_plans",
+            TabKind::LicensedUsers => "tab.licensed_users",
+            TabKind::AppUsers => "tab.app_users",
+            TabKind::Permissions => "tab.permissions",
+            TabKind::MailboxAccess => "tab.mailbox_access",
+            TabKind::AutoReplies => "tab.auto_replies",
+            TabKind::Security => "tab.security",
+            TabKind::AuthMethods => "tab.auth_methods",
+            TabKind::SignIns => "tab.sign_ins",
+        })
     }
 }
 
@@ -79,6 +79,7 @@ pub enum TabBody {
     Loading,
     Error(String),
     Fields(Vec<(String, String)>),
+    /// The keys of the column titles in the catalogue, and the rows.
     Table { headers: Vec<&'static str>, rows: Vec<SheetRow> },
 }
 
@@ -132,24 +133,24 @@ impl Sheet {
         self.node.object_name(&self.obj)
     }
 
-    /// Labels for the add / remove / edit operations available on a tab.
+    /// The keys of the labels for the add / remove / edit operations available on a tab.
     fn op_labels(&self, kind: TabKind) -> [Option<&'static str>; 3] {
         use TabKind::*;
         let editable = matches!(self.node, Node::Users | Node::Groups | Node::Applications | Node::Mailboxes | Node::DistributionLists);
         match (self.node, kind) {
             (Node::Users, Security | AuthMethods | SignIns) => crate::security::op_labels(kind),
-            (_, General) if editable => [None, None, Some("Edit…")],
-            (Node::Users, MemberOf) => [Some("Add to group…"), Some("Remove from group"), None],
-            (Node::Users, UserLicences) | (Node::Groups, GroupLicences) => [Some("Assign licence…"), Some("Remove licence"), None],
-            (_, Roles) => [Some("Assign role…"), Some("Remove assignment"), None],
-            (_, Members) => [Some("Add member…"), Some("Remove member"), None],
-            (Node::Groups | Node::Applications, Owners) => [Some("Add owner…"), Some("Remove owner"), None],
-            (_, AppUsers) => [Some("Assign user or group…"), Some("Remove assignment"), None],
-            (_, Permissions) => [None, Some("Revoke permission"), None],
-            (_, MailboxAccess) => [Some("Add permission…"), Some("Remove permission"), None],
-            (_, AutoReplies) => [None, None, Some("Edit…")],
-            (_, ListMembers) => [Some("Add member…"), Some("Remove member"), None],
-            (_, LicensedUsers) => [Some("Assign to user…"), Some("Remove from user"), None],
+            (_, General) if editable => [None, None, Some("sheet.edit")],
+            (Node::Users, MemberOf) => [Some("act.add_to_group"), Some("sheet.remove_from_group"), None],
+            (Node::Users, UserLicences) | (Node::Groups, GroupLicences) => [Some("act.assign_licence"), Some("task.remove_licence"), None],
+            (_, Roles) => [Some("sheet.assign_role"), Some("sheet.remove_assignment"), None],
+            (_, Members) => [Some("act.add_member"), Some("sheet.remove_member"), None],
+            (Node::Groups | Node::Applications, Owners) => [Some("sheet.add_owner"), Some("sheet.remove_owner"), None],
+            (_, AppUsers) => [Some("sheet.assign_user_or_group"), Some("sheet.remove_assignment"), None],
+            (_, Permissions) => [None, Some("sheet.revoke_permission"), None],
+            (_, MailboxAccess) => [Some("sheet.add_permission"), Some("sheet.remove_permission"), None],
+            (_, AutoReplies) => [None, None, Some("sheet.edit")],
+            (_, ListMembers) => [Some("act.add_member"), Some("sheet.remove_member"), None],
+            (_, LicensedUsers) => [Some("act.assign_to_user"), Some("sheet.remove_from_user"), None],
             _ => [None, None, None],
         }
     }
@@ -161,17 +162,16 @@ pub fn table(headers: Vec<&'static str>, items: Vec<Value>, cells: impl Fn(&Valu
 }
 
 fn odata_kind(v: &Value) -> String {
-    let t = v["@odata.type"].as_str().unwrap_or("").trim_start_matches("#microsoft.graph.");
-    match t {
-        "user" => "User",
-        "group" => "Group",
-        "device" => "Device",
-        "directoryRole" => "Directory role",
-        "orgContact" => "Contact",
-        "servicePrincipal" => "Application",
-        other => other,
+    let kind = v["@odata.type"].as_str().unwrap_or("").trim_start_matches("#microsoft.graph.");
+    match kind {
+        "user" => t("value.user"),
+        "group" => t("value.group"),
+        "device" => t("value.device"),
+        "directoryRole" => t("value.directory_role"),
+        "orgContact" => t("value.contact"),
+        "servicePrincipal" => t("value.application"),
+        other => other.to_string(),
     }
-    .to_string()
 }
 
 fn sku_names(g: &Graph) -> anyhow::Result<std::collections::HashMap<String, String>> {
@@ -205,55 +205,55 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
             let total = obj["prepaidUnits"]["enabled"].as_i64().unwrap_or(0);
             let used = obj["consumedUnits"].as_i64().unwrap_or(0);
             TabBody::Fields(vec![
-                ("Product".into(), sku_name(&s(obj, "skuPartNumber"))),
-                ("SKU part number".into(), s(obj, "skuPartNumber")),
-                ("SKU ID".into(), s(obj, "skuId")),
-                ("Status".into(), s(obj, "capabilityStatus")),
-                ("Applies to".into(), s(obj, "appliesTo")),
-                ("Assigned".into(), used.to_string()),
-                ("Total (enabled)".into(), total.to_string()),
-                ("Available".into(), (total - used).to_string()),
-                ("Suspended".into(), obj["prepaidUnits"]["suspended"].to_string()),
-                ("In warning".into(), obj["prepaidUnits"]["warning"].to_string()),
+                (t("prop.product"), sku_name(&s(obj, "skuPartNumber"))),
+                (t("prop.sku_part"), s(obj, "skuPartNumber")),
+                (t("prop.sku_id"), s(obj, "skuId")),
+                (t("prop.status"), s(obj, "capabilityStatus")),
+                (t("prop.applies_to"), s(obj, "appliesTo")),
+                (t("prop.assigned"), used.to_string()),
+                (t("prop.total_enabled"), total.to_string()),
+                (t("prop.available"), (total - used).to_string()),
+                (t("prop.suspended"), obj["prepaidUnits"]["suspended"].to_string()),
+                (t("prop.in_warning"), obj["prepaidUnits"]["warning"].to_string()),
             ])
         }
-        (Node::Root | Node::Exchange, _) => TabBody::Fields(vec![("Name".into(), s(obj, "name"))]),
+        (Node::Root | Node::Exchange, _) => TabBody::Fields(vec![(t("prop.name"), s(obj, "name"))]),
         (_, General) => {
             let (select, keys): (&str, &[(&str, &str)]) = match node {
                 Node::Users => (
                     "id,displayName,givenName,surname,userPrincipalName,mail,jobTitle,department,companyName,officeLocation,mobilePhone,businessPhones,usageLocation,accountEnabled,userType,createdDateTime,lastPasswordChangeDateTime,onPremisesSyncEnabled,employeeId",
-                    &[("Display name", "displayName"), ("First name", "givenName"), ("Last name", "surname"), ("User principal name", "userPrincipalName"), ("Email", "mail"), ("Job title", "jobTitle"), ("Department", "department"), ("Company", "companyName"), ("Office", "officeLocation"), ("Mobile phone", "mobilePhone"), ("Business phones", "businessPhones"), ("Usage location", "usageLocation"), ("Employee ID", "employeeId"), ("Account enabled", "accountEnabled"), ("User type", "userType"), ("Synced from on-premises", "onPremisesSyncEnabled"), ("Created", "createdDateTime"), ("Password last changed", "lastPasswordChangeDateTime"), ("Object ID", "id")],
+                    &[("prop.display_name", "displayName"), ("prop.first_name", "givenName"), ("prop.last_name", "surname"), ("prop.upn", "userPrincipalName"), ("prop.email", "mail"), ("prop.job_title", "jobTitle"), ("prop.department", "department"), ("prop.company", "companyName"), ("prop.office", "officeLocation"), ("prop.mobile_phone", "mobilePhone"), ("prop.business_phones", "businessPhones"), ("prop.usage_location", "usageLocation"), ("prop.employee_id", "employeeId"), ("prop.account_enabled", "accountEnabled"), ("prop.user_type", "userType"), ("prop.synced", "onPremisesSyncEnabled"), ("prop.created", "createdDateTime"), ("prop.password_changed", "lastPasswordChangeDateTime"), ("prop.object_id", "id")],
                 ),
                 Node::Applications => (
                     "id,appId,displayName,publisherName,accountEnabled,appRoleAssignmentRequired,tags,appRoles,homepage,loginUrl,replyUrls,notes,signInAudience,preferredSingleSignOnMode",
-                    &[("Name", "displayName"), ("Publisher", "publisherName"), ("Enabled for users to sign in", "accountEnabled"), ("Assignment required", "appRoleAssignmentRequired"), ("Homepage", "homepage"), ("Sign-on URL", "loginUrl"), ("Reply URLs", "replyUrls"), ("Single sign-on mode", "preferredSingleSignOnMode"), ("Sign-in audience", "signInAudience"), ("Notes", "notes"), ("Application ID", "appId"), ("Object ID", "id")],
+                    &[("prop.name", "displayName"), ("prop.publisher", "publisherName"), ("prop.sign_in_enabled", "accountEnabled"), ("prop.assignment_required", "appRoleAssignmentRequired"), ("prop.homepage", "homepage"), ("prop.sign_on_url", "loginUrl"), ("prop.reply_urls", "replyUrls"), ("prop.sso_mode", "preferredSingleSignOnMode"), ("prop.audience", "signInAudience"), ("prop.notes", "notes"), ("prop.application_id", "appId"), ("prop.object_id", "id")],
                 ),
                 Node::Groups => (
                     "id,displayName,description,mail,mailNickname,mailEnabled,securityEnabled,groupTypes,isAssignableToRole,membershipRule,membershipRuleProcessingState,visibility,createdDateTime,onPremisesSyncEnabled,assignedLicenses",
-                    &[("Name", "displayName"), ("Description", "description"), ("Email", "mail"), ("Mail nickname", "mailNickname"), ("Security enabled", "securityEnabled"), ("Mail enabled", "mailEnabled"), ("Group types", "groupTypes"), ("Role-assignable", "isAssignableToRole"), ("Membership rule", "membershipRule"), ("Rule processing", "membershipRuleProcessingState"), ("Visibility", "visibility"), ("Synced from on-premises", "onPremisesSyncEnabled"), ("Created", "createdDateTime"), ("Object ID", "id")],
+                    &[("prop.name", "displayName"), ("prop.description", "description"), ("prop.email", "mail"), ("prop.mail_nickname", "mailNickname"), ("prop.security_enabled", "securityEnabled"), ("prop.mail_enabled", "mailEnabled"), ("prop.group_types", "groupTypes"), ("prop.role_assignable", "isAssignableToRole"), ("prop.membership_rule", "membershipRule"), ("prop.rule_processing", "membershipRuleProcessingState"), ("prop.visibility", "visibility"), ("prop.synced", "onPremisesSyncEnabled"), ("prop.created", "createdDateTime"), ("prop.object_id", "id")],
                 ),
                 _ => (
                     "id,deviceId,displayName,operatingSystem,operatingSystemVersion,trustType,accountEnabled,isCompliant,isManaged,manufacturer,model,approximateLastSignInDateTime,registrationDateTime,profileType,onPremisesSyncEnabled",
-                    &[("Name", "displayName"), ("Operating system", "operatingSystem"), ("OS version", "operatingSystemVersion"), ("Join type", "trustType"), ("Manufacturer", "manufacturer"), ("Model", "model"), ("Enabled", "accountEnabled"), ("Compliant", "isCompliant"), ("Managed", "isManaged"), ("Profile type", "profileType"), ("Synced from on-premises", "onPremisesSyncEnabled"), ("Registered", "registrationDateTime"), ("Last sign-in", "approximateLastSignInDateTime"), ("Device ID", "deviceId"), ("Object ID", "id")],
+                    &[("prop.name", "displayName"), ("prop.os", "operatingSystem"), ("prop.os_version", "operatingSystemVersion"), ("prop.join_type", "trustType"), ("prop.manufacturer", "manufacturer"), ("prop.model", "model"), ("prop.enabled", "accountEnabled"), ("prop.compliant", "isCompliant"), ("prop.managed", "isManaged"), ("prop.profile_type", "profileType"), ("prop.synced", "onPremisesSyncEnabled"), ("prop.registered", "registrationDateTime"), ("prop.last_sign_in", "approximateLastSignInDateTime"), ("prop.device_id", "deviceId"), ("prop.object_id", "id")],
                 ),
             };
             let fresh = g.get(&format!("/{coll}/{id}?$select={select}"))?;
             let mut fields = general_fields(&fresh, keys);
             if node == Node::Devices {
-                fields[3].1 = model::join_type(&fields[3].1).to_string();
+                fields[3].1 = model::join_type(&fields[3].1);
             }
             if node == Node::Applications {
-                fields.insert(4, ("Visible to users".into(), model::yes_no(&model::visible_to_users(&fresh))));
+                fields.insert(4, (t("prop.visible_to_users"), model::yes_no(&model::visible_to_users(&fresh))));
             }
             return Ok((TabBody::Fields(fields), Some(fresh), Vec::new()));
         }
         (_, MemberOf) => {
             let items = g.list(&format!("/{coll}/{id}/memberOf?$select=id,displayName,mail,description&$top=999"))?;
-            table(vec!["Name", "Type", "Email"], items, |v| vec![s(v, "displayName"), odata_kind(v), s(v, "mail")])
+            table(vec!["col.name", "col.type", "col.email"], items, |v| vec![s(v, "displayName"), odata_kind(v), s(v, "mail")])
         }
         (Node::Users, UserLicences) => {
             let items = g.list(&format!("/users/{id}/licenseDetails"))?;
-            table(vec!["Product", "SKU", "Service plans"], items, |v| {
+            table(vec!["col.product", "col.sku", "col.service_plans"], items, |v| {
                 vec![sku_name(&s(v, "skuPartNumber")), s(v, "skuPartNumber"), model::count(&v["servicePlans"])]
             })
         }
@@ -261,7 +261,7 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
             let fresh = g.get(&format!("/groups/{id}?$select=assignedLicenses"))?;
             let names = sku_names(g)?;
             let items = fresh["assignedLicenses"].as_array().cloned().unwrap_or_default();
-            table(vec!["Product", "SKU ID", "Disabled plans"], items, |v| {
+            table(vec!["col.product", "col.sku_id", "col.disabled_plans"], items, |v| {
                 let sku = s(v, "skuId");
                 vec![names.get(&sku).cloned().unwrap_or_else(|| sku.clone()), sku, model::count(&v["disabledPlans"])]
             })
@@ -270,26 +270,26 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
             let items = g.list(&format!(
                 "/roleManagement/directory/roleAssignments?$filter=principalId eq '{id}'&$expand=roleDefinition($select=displayName,description)"
             ))?;
-            table(vec!["Role", "Scope", "Description"], items, |v| {
+            table(vec!["col.role", "col.scope", "col.description"], items, |v| {
                 vec![s(&v["roleDefinition"], "displayName"), s(v, "directoryScopeId"), s(&v["roleDefinition"], "description")]
             })
         }
         (_, Members) => {
             let items = g.list(&format!("/groups/{id}/members?$select=id,displayName,userPrincipalName,mail&$top=999"))?;
-            table(vec!["Name", "Type", "UPN / email"], items, principal_cols)
+            table(vec!["col.name", "col.type", "col.upn_or_email"], items, principal_cols)
         }
         (_, Owners) => {
             let items = g.list(&format!("/{coll}/{id}/owners?$select=id,displayName,userPrincipalName,mail"))?;
-            table(vec!["Name", "Type", "UPN / email"], items, principal_cols)
+            table(vec!["col.name", "col.type", "col.upn_or_email"], items, principal_cols)
         }
         (_, RegisteredOwners) | (_, RegisteredUsers) => {
             let rel = if kind == RegisteredOwners { "registeredOwners" } else { "registeredUsers" };
             let items = g.list(&format!("/devices/{id}/{rel}?$select=id,displayName,userPrincipalName,mail"))?;
-            table(vec!["Name", "Type", "UPN / email"], items, principal_cols)
+            table(vec!["col.name", "col.type", "col.upn_or_email"], items, principal_cols)
         }
         (_, ServicePlans) => {
             let items = obj["servicePlans"].as_array().cloned().unwrap_or_default();
-            table(vec!["Service plan", "Applies to", "Status"], items, |v| {
+            table(vec!["col.service_plan", "col.applies_to", "col.status"], items, |v| {
                 vec![s(v, "servicePlanName"), s(v, "appliesTo"), s(v, "provisioningStatus")]
             })
         }
@@ -298,7 +298,7 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
             let items = g.list_advanced(&format!(
                 "/users?$filter=assignedLicenses/any(x:x/skuId eq {sku})&$select=id,displayName,userPrincipalName,accountEnabled&$count=true&$top=999"
             ))?;
-            table(vec!["Name", "User principal name", "Enabled"], items, |v| {
+            table(vec!["col.name", "col.upn", "col.enabled"], items, |v| {
                 vec![s(v, "displayName"), s(v, "userPrincipalName"), model::yes_no(&v["accountEnabled"])]
             })
         }
@@ -311,11 +311,11 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
                 .map(|r| (s(r, "id"), s(r, "displayName")))
                 .collect();
             let items = g.list(&format!("/servicePrincipals/{id}/appRoleAssignedTo?$top=999"))?;
-            table(vec!["Name", "Type", "Role"], items, |v| {
+            table(vec!["col.name", "col.type", "col.role"], items, |v| {
                 let role = s(v, "appRoleId");
                 let role = match roles.get(&role) {
                     Some(name) => name.clone(),
-                    None if role == DEFAULT_ACCESS_ROLE => "Default access".into(),
+                    None if role == DEFAULT_ACCESS_ROLE => t("value.default_access"),
                     None => role,
                 };
                 vec![s(v, "principalDisplayName"), s(v, "principalType"), role]
@@ -342,7 +342,7 @@ fn load_permissions(g: &Graph, id: &str) -> anyhow::Result<TabBody> {
             .and_then(|roles| roles.iter().find(|r| r["id"] == role.as_str()))
             .map(|r| s(r, "value"))
             .unwrap_or(role);
-        let cells = vec![s(&a, "resourceDisplayName"), perm, "Application".into(), "Admin consent".into()];
+        let cells = vec![s(&a, "resourceDisplayName"), perm, t("value.application"), t("value.admin_consent")];
         a["kind"] = json!("application");
         rows.push(SheetRow { cells, data: a });
     }
@@ -364,18 +364,18 @@ fn load_permissions(g: &Graph, id: &str) -> anyhow::Result<TabBody> {
         let api = if api.is_null() { resource } else { s(&api, "displayName") };
         let scopes = s(&grant, "scope").split_whitespace().collect::<Vec<_>>().join(", ");
         let granted_for = if grant["consentType"] == "AllPrincipals" {
-            "All users (admin consent)".to_string()
+            t("value.all_users_admin_consent")
         } else {
             // A user since deleted shows as their ID.
             let user = s(&grant, "principalId");
             user_names.get(&user).cloned().unwrap_or(user)
         };
-        let cells = vec![api, scopes, "Delegated".into(), granted_for];
+        let cells = vec![api, scopes, t("value.delegated"), granted_for];
         grant["kind"] = json!("delegated");
         rows.push(SheetRow { cells, data: grant });
     }
     rows.sort_by_cached_key(|r| (r.cells[0].to_lowercase(), r.cells[2].clone(), r.cells[1].to_lowercase()));
-    Ok(TabBody::Table { headers: vec!["API", "Permissions", "Type", "Granted for"], rows })
+    Ok(TabBody::Table { headers: vec!["col.api", "col.permissions", "col.type", "col.granted_for"], rows })
 }
 
 impl App {
@@ -389,7 +389,7 @@ impl App {
     /// Starts loading a tab; the result is applied when the sheet is back on the dialog stack.
     fn start_tab_load(&mut self, sheet_id: u64, node: Node, kind: TabKind, obj: Value) {
         self.spawn(
-            format!("Loading {}…", kind.title().to_lowercase()),
+            tf("status.loading_tab", &[("tab", &kind.title())]),
             move |g| load_tab(g, node, kind, &obj),
             move |app, r| {
                 let mut fresh_obj = None;
@@ -424,7 +424,7 @@ impl App {
                     app.upsert(node, f);
                 }
                 if !missing.is_empty() {
-                    app.offer_scopes(kind.title(), missing);
+                    app.offer_scopes(&kind.title(), missing);
                 }
             },
         );
@@ -483,19 +483,20 @@ impl App {
         modal.show(ctx, |ui| {
             ui.set_width(760.0);
             ui.set_min_height(440.0);
-            ui.heading(format!("{} {} Properties", sheet.node.icon(), name));
+            ui.heading(format!("{} {}", sheet.node.icon(), tf("sheet.title", &[("name", &name)])));
             ui.add_space(6.0);
             // Tab strip.
             ui.horizontal_wrapped(|ui| {
                 for (i, tab) in sheet.tabs.iter().enumerate() {
-                    let r = ui.selectable_label(sheet.active == i, tab.kind.title());
-                    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, sheet.active == i, format!("{} tab", tab.kind.title())));
+                    let title = tab.kind.title();
+                    let r = ui.selectable_label(sheet.active == i, &title);
+                    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, sheet.active == i, tf("sheet.tab", &[("tab", &title)])));
                     if r.clicked() {
                         sheet.active = i;
                     }
                 }
             });
-            ui.label(RichText::new("Ctrl+Tab switches tabs").small().weak());
+            ui.label(RichText::new(t("sheet.ctrl_tab")).small().weak());
             ui.separator();
             let tab = &mut sheet.tabs[sheet.active];
             let body_height = 330.0;
@@ -504,7 +505,7 @@ impl App {
                     ui.allocate_ui(egui::vec2(ui.available_width(), body_height), |ui| {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Loading…");
+                            ui.label(t("sheet.loading"));
                         });
                     });
                 }
@@ -527,9 +528,10 @@ impl App {
                 TabBody::Table { headers, rows } => {
                     if rows.is_empty() {
                         ui.allocate_ui(egui::vec2(ui.available_width(), body_height), |ui| {
-                            ui.label("There are no items to show.");
+                            ui.label(t("sheet.empty"));
                         });
                     } else {
+                        let headers: Vec<String> = headers.iter().map(|h| t(h)).collect();
                         let mut clicked = None;
                         let mut first_focus = first;
                         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
@@ -546,9 +548,9 @@ impl App {
                             tb = tb.column(if i + 1 == headers.len() { Column::remainder() } else { Column::initial(200.0).clip(true) });
                         }
                         tb.header(row_h, |mut h| {
-                            for t in headers {
+                            for title in &headers {
                                 h.col(|ui| {
-                                    ui.label(RichText::new(*t).bold());
+                                    ui.label(RichText::new(title).bold());
                                 });
                             }
                         })
@@ -593,27 +595,27 @@ impl App {
             ui.horizontal(|ui| {
                 let has_row = tab.sel.is_some() && matches!(tab.body, TabBody::Table { .. });
                 if let Some(l) = labels[0]
-                    && ui.button(l).on_hover_text("Insert").clicked() {
+                    && ui.button(t(l)).on_hover_text("Insert").clicked() {
                         op = Some(TabOp::Add);
                     }
                 if let Some(l) = labels[1]
-                    && ui.add_enabled(has_row, egui::Button::new(l)).on_hover_text("Delete").clicked() {
+                    && ui.add_enabled(has_row, egui::Button::new(t(l))).on_hover_text("Delete").clicked() {
                         op = Some(TabOp::Remove);
                     }
                 if let Some(l) = labels[2]
-                    && ui.button(l).on_hover_text("F2").clicked() {
+                    && ui.button(t(l)).on_hover_text("F2").clicked() {
                         op = Some(TabOp::Edit);
                     }
                 for (i, l) in extras.iter().enumerate() {
-                    if ui.button(*l).clicked() {
+                    if ui.button(t(l)).clicked() {
                         op = Some(TabOp::Extra(i));
                     }
                 }
-                if ui.button("Refresh").on_hover_text("F5").clicked() {
+                if ui.button(t("act.refresh")).on_hover_text("F5").clicked() {
                     op = Some(TabOp::Reload);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let c = ui.button("  Close  ");
+                    let c = ui.button(format!("  {}  ", t("dialog.close")));
                     if first && !matches!(tab.body, TabBody::Table { .. }) {
                         c.request_focus();
                     }
@@ -664,23 +666,23 @@ impl App {
 
         match op {
             TabOp::Add if labels[0].is_some() => match kind {
-                MemberOf => self.pick_group(&format!("Add {name} to group"), move |app, g| app.add_member(&g.id, &id, reload)),
-                Members => self.pick_principal(&format!("Add member to {name}"), move |app, m| app.add_member(&id, &m.id, reload)),
+                MemberOf => self.pick_group(&tf("pick.add_to_group", &[("name", &name)]), move |app, g| app.add_member(&g.id, &id, reload)),
+                Members => self.pick_principal(&tf("pick.add_member_to", &[("name", &name)]), move |app, m| app.add_member(&id, &m.id, reload)),
                 AppUsers => self.assign_app(obj, reload),
                 Owners => {
                     let coll = collection(node);
-                    self.pick_user(&format!("Add owner to {name}"), move |app, u| app.add_owner(coll, &id, &u.id, reload));
+                    self.pick_user(&tf("pick.add_owner_to", &[("name", &name)]), move |app, u| app.add_owner(coll, &id, &u.id, reload));
                 }
                 Roles => {
                     if node == Node::Groups && obj["isAssignableToRole"] != true {
-                        self.push(Dialog::message("Assign directory role", "Only role-assignable groups can be assigned directory roles."));
+                        self.push(Dialog::message(&t("task.assign_role"), &t("sheet.role_assignable_only")));
                         return;
                     }
-                    self.pick_role(&format!("Assign directory role to {name}"), move |app, r| app.assign_role(&id, &r.id, reload));
+                    self.pick_role(&tf("pick.assign_role_to", &[("name", &name)]), move |app, r| app.assign_role(&id, &r.id, reload));
                 }
                 UserLicences | GroupLicences => {
                     let coll = collection(node);
-                    self.pick_sku(&format!("Assign licence to {name}"), move |app, sku| {
+                    self.pick_sku(&tf("pick.assign_licence_to", &[("name", &name)]), move |app, sku| {
                         app.set_licence(coll, &id, &sku.id, true, move |app| {
                             reload(app);
                             app.load(node);
@@ -689,7 +691,7 @@ impl App {
                 }
                 LicensedUsers => {
                     let sku = s(&obj, "skuId");
-                    self.pick_user(&format!("Assign {name} to user"), move |app, u| {
+                    self.pick_user(&tf("pick.assign_to_user", &[("name", &name)]), move |app, u| {
                         app.set_licence("users", &u.id, &sku, true, move |app| {
                             reload(app);
                             app.load(Node::Licences);
@@ -704,55 +706,58 @@ impl App {
                 let (what, path_or_body): (String, Work) = match kind {
                     MemberOf => {
                         let path = format!("/groups/{rid}/members/{id}/$ref");
-                        (format!("Remove {name} from '{}'?", s(&row, "displayName")), Box::new(move |g| g.delete(&path)))
+                        let question = tf("sheet.remove_from_question", &[("name", &name), ("from", &s(&row, "displayName"))]);
+                        (question, Box::new(move |g| g.delete(&path)))
                     }
                     Members | Owners => {
-                        let rel = if kind == Members { "members" } else { "owners" };
+                        let (rel, key) = if kind == Members { ("members", "sheet.remove_member_question") } else { ("owners", "sheet.remove_owner_question") };
                         let path = format!("/{}/{id}/{rel}/{rid}/$ref", collection(node));
-                        (format!("Remove '{}' from {rel} of {name}?", s(&row, "displayName")), Box::new(move |g| g.delete(&path)))
+                        (tf(key, &[("member", &s(&row, "displayName")), ("name", &name)]), Box::new(move |g| g.delete(&path)))
                     }
                     Roles => {
                         let path = format!("/roleManagement/directory/roleAssignments/{rid}");
-                        (format!("Remove the role '{}' from {name}?", s(&row["roleDefinition"], "displayName")), Box::new(move |g| g.delete(&path)))
+                        let question = tf("sheet.remove_role_question", &[("role", &s(&row["roleDefinition"], "displayName")), ("name", &name)]);
+                        (question, Box::new(move |g| g.delete(&path)))
                     }
                     UserLicences | GroupLicences => {
                         let sku = s(&row, "skuId");
                         let path = format!("/{}/{id}/assignLicense", collection(node));
                         let body = json!({ "addLicenses": [], "removeLicenses": [sku] });
-                        (format!("Remove this licence from {name}?"), Box::new(move |g| g.post(&path, &body).map(|_| ())))
+                        (tf("sheet.remove_licence_question", &[("name", &name)]), Box::new(move |g| g.post(&path, &body).map(|_| ())))
                     }
                     AppUsers => {
                         let path = format!("/servicePrincipals/{id}/appRoleAssignedTo/{rid}");
-                        (format!("Remove '{}' from {name}?", s(&row, "principalDisplayName")), Box::new(move |g| g.delete(&path)))
+                        let question = tf("sheet.remove_assignment_question", &[("member", &s(&row, "principalDisplayName")), ("name", &name)]);
+                        (question, Box::new(move |g| g.delete(&path)))
                     }
                     Permissions => {
                         let (what, path) = if row["kind"] == "application" {
-                            let what = format!(
-                                "Revoke the application permission {} on {} from {name}? It will no longer be able to use it without signing in as a user.",
-                                cells[1], cells[0]
-                            );
-                            (what, format!("/servicePrincipals/{id}/appRoleAssignments/{rid}"))
+                            let args: [(&str, &dyn std::fmt::Display); 3] = [("permission", &cells[1]), ("api", &cells[0]), ("name", &name)];
+                            (tf("sheet.revoke_application_question", &args), format!("/servicePrincipals/{id}/appRoleAssignments/{rid}"))
                         } else {
-                            let who = if row["consentType"] == "AllPrincipals" { "all users" } else { cells[3].as_str() };
-                            let what = format!(
-                                "Revoke the delegated permissions on {} granted to {name} for {who}? This revokes all of them: {}. \
-                                 Users may be asked to consent again the next time they sign in.",
-                                cells[0], cells[1]
-                            );
-                            (what, format!("/oauth2PermissionGrants/{rid}"))
+                            let key = if row["consentType"] == "AllPrincipals" {
+                                "sheet.revoke_delegated_all_question"
+                            } else {
+                                "sheet.revoke_delegated_question"
+                            };
+                            let args: [(&str, &dyn std::fmt::Display); 4] =
+                                [("api", &cells[0]), ("name", &name), ("user", &cells[3]), ("permissions", &cells[1])];
+                            (tf(key, &args), format!("/oauth2PermissionGrants/{rid}"))
                         };
                         (what, Box::new(move |g| g.delete(&path)))
                     }
                     LicensedUsers => {
                         let path = format!("/users/{rid}/assignLicense");
                         let body = json!({ "addLicenses": [], "removeLicenses": [s(&obj, "skuId")] });
-                        (format!("Remove {name} from '{}'?", s(&row, "displayName")), Box::new(move |g| g.post(&path, &body).map(|_| ())))
+                        let question = tf("sheet.remove_from_question", &[("name", &name), ("from", &s(&row, "displayName"))]);
+                        (question, Box::new(move |g| g.post(&path, &body).map(|_| ())))
                     }
                     _ => return,
                 };
-                let label = labels[1].unwrap_or("Remove");
-                self.push(Dialog::confirm(label, &what, move |app| {
-                    app.mutate(label, path_or_body, move |app| {
+                let label = t(labels[1].unwrap_or("sheet.remove"));
+                let title = label.clone();
+                self.push(Dialog::confirm(&title, &what, move |app| {
+                    app.mutate(&label, path_or_body, move |app| {
                         reload(app);
                         if matches!(kind, UserLicences | GroupLicences | LicensedUsers) {
                             app.load(node);
@@ -770,33 +775,33 @@ impl App {
         let id = s(&obj, "id");
         let form = match node {
             Node::Users => {
-                let mut f = Form::new(&format!("Edit {}", s(&obj, "displayName")), "Save");
+                let mut f = Form::new(&tf("sheet.edit_title", &[("name", &s(&obj, "displayName"))]), &t("dialog.save"));
                 for (key, label) in [
-                    ("displayName", "Display name"),
-                    ("givenName", "First name"),
-                    ("surname", "Last name"),
-                    ("jobTitle", "Job title"),
-                    ("department", "Department"),
-                    ("companyName", "Company"),
-                    ("officeLocation", "Office"),
-                    ("mobilePhone", "Mobile phone"),
-                    ("employeeId", "Employee ID"),
-                    ("usageLocation", "Usage location"),
+                    ("displayName", "field.display_name"),
+                    ("givenName", "field.first_name"),
+                    ("surname", "field.last_name"),
+                    ("jobTitle", "field.job_title"),
+                    ("department", "field.department"),
+                    ("companyName", "field.company"),
+                    ("officeLocation", "field.office"),
+                    ("mobilePhone", "field.mobile_phone"),
+                    ("employeeId", "field.employee_id"),
+                    ("usageLocation", "field.usage_location"),
                 ] {
-                    let field = Field::text(key, label, &s(&obj, key));
+                    let field = Field::text(key, &t(label), &s(&obj, key));
                     f = f.field(if key == "displayName" { field.required() } else { field });
                 }
                 f
             }
-            Node::Groups => Form::new(&format!("Edit {}", s(&obj, "displayName")), "Save")
-                .field(Field::text("displayName", "Name", &s(&obj, "displayName")).required())
-                .field(Field::multiline("description", "Description", &s(&obj, "description"))),
+            Node::Groups => Form::new(&tf("sheet.edit_title", &[("name", &s(&obj, "displayName"))]), &t("dialog.save"))
+                .field(Field::text("displayName", &t("field.name"), &s(&obj, "displayName")).required())
+                .field(Field::multiline("description", &t("field.description"), &s(&obj, "description"))),
             Node::Applications => return self.edit_application(sheet_id, obj),
             _ => return,
         };
         let form = form.on_submit(move |app, f| {
             if !crate::ops::is_usage_location(&f.text("usageLocation")) {
-                return Err("Usage location must be a two-letter country code, such as GB.".into());
+                return Err(t("user.bad_usage_location"));
             }
             let mut body = json!({});
             for field in &f.fields {
@@ -821,7 +826,7 @@ impl App {
             let path = format!("/{}/{id}", collection(node));
             let patch = body.clone();
             let oid = id.clone();
-            app.mutate("Save changes", move |g| g.patch(&path, &patch), move |app| {
+            app.mutate(&t("task.save_changes"), move |g| g.patch(&path, &patch), move |app| {
                 let mut updated = body;
                 updated["id"] = json!(oid);
                 app.upsert(node, updated);
@@ -837,15 +842,12 @@ impl App {
         let visible = model::visible_to_users(&obj) != false;
         // A missing value shows as the default, and only counts as changed if the box is.
         let was = [("accountEnabled", obj["accountEnabled"] != false), ("appRoleAssignmentRequired", obj["appRoleAssignmentRequired"] == true)];
-        let form = Form::new(&format!("Edit {}", s(&obj, "displayName")), "Save")
-            .field(Field::check("accountEnabled", "Enabled for users to sign in", was[0].1))
-            .field(Field::check("appRoleAssignmentRequired", "Assignment required", was[1].1))
-            .field(Field::check("visible", "Visible to users", visible))
-            .field(Field::multiline("notes", "Notes", &s(&obj, "notes")))
-            .intro(
-                "When assignment is required, only the users and groups on the Users and groups tab can sign in. \
-                 Applications that are not visible are left out of My Apps and the Microsoft 365 app launcher.",
-            )
+        let form = Form::new(&tf("sheet.edit_title", &[("name", &s(&obj, "displayName"))]), &t("dialog.save"))
+            .field(Field::check("accountEnabled", &t("prop.sign_in_enabled"), was[0].1))
+            .field(Field::check("appRoleAssignmentRequired", &t("prop.assignment_required"), was[1].1))
+            .field(Field::check("visible", &t("prop.visible_to_users"), visible))
+            .field(Field::multiline("notes", &t("prop.notes"), &s(&obj, "notes")))
+            .intro(&t("sheet.app_intro"))
             .on_submit(move |app, f| {
                 let mut body = json!({});
                 for (key, before) in was {
@@ -868,7 +870,7 @@ impl App {
                 let path = format!("/servicePrincipals/{id}");
                 let patch = body.clone();
                 let oid = id.clone();
-                app.mutate("Save changes", move |g| g.patch(&path, &patch), move |app| {
+                app.mutate(&t("task.save_changes"), move |g| g.patch(&path, &patch), move |app| {
                     let mut updated = body;
                     updated["id"] = json!(oid);
                     app.upsert(Node::Applications, updated);

@@ -4,6 +4,7 @@ use crate::auth::{Api, Auth, NeedsConsent, NeedsScopes};
 use crate::config::Settings;
 use crate::dialogs::{Dialog, DialogEntry};
 use crate::graph::Graph;
+use crate::i18n::{t, tf};
 use crate::model::{Node, Source, TREE};
 use crate::ops::{item_actions, node_actions, Act};
 use eframe::egui::{
@@ -80,6 +81,8 @@ pub struct App {
     next_id: u64,
     busy: usize,
     pub status: String,
+    /// Translating the interface (see `language`).
+    pub translation: Option<Arc<crate::language::Job>>,
     quit: bool,
 }
 
@@ -164,11 +167,11 @@ impl App {
             pending_picker_search: Vec::new(),
             next_id: 1,
             busy: 0,
-            status: "Ready".into(),
+            status: t("status.ready"),
+            translation: None,
             quit: false,
         };
-        app.data.insert(Node::Root, child_rows(Node::Root));
-        app.data.insert(Node::Exchange, child_rows(Node::Exchange));
+        app.language_changed();
         if app.settings.is_complete() {
             app.connect();
         } else {
@@ -202,9 +205,17 @@ impl App {
         self.dialogs.iter_mut().find(|d| d.id == id).map(|d| &mut d.dialog)
     }
 
+    /// Brings text the app keeps, rather than draws afresh each frame, into the language now in
+    /// use.
+    pub fn language_changed(&mut self) {
+        self.data.insert(Node::Root, child_rows(Node::Root));
+        self.data.insert(Node::Exchange, child_rows(Node::Exchange));
+        self.view_dirty = true;
+    }
+
     pub fn error(&mut self, title: &str, err: impl std::fmt::Display) {
         log::error!("{title}: {err}");
-        self.status = format!("{title} failed");
+        self.status = tf("status.failed", &[("title", &title)]);
         self.push(Dialog::message(title, &err.to_string()));
     }
 
@@ -215,7 +226,7 @@ impl App {
             let missing = missing.clone();
             if self.offer_scopes(title, missing) {
                 log::warn!("{title}: {err}");
-                self.status = format!("{title} needs more permissions");
+                self.status = tf("status.needs_permissions", &[("title", &title)]);
                 return;
             }
         }
@@ -232,17 +243,9 @@ impl App {
         if !new {
             return false;
         }
-        let text = format!(
-            "{feature} needs Microsoft Graph permissions this app hasn't been granted: {}.\n\n\
-             A Global Administrator or Privileged Role Administrator can approve them now by signing in \
-             and ticking \"Consent on behalf of your organization\". You stay signed in as you are if \
-             that is cancelled. They can also be added on the app registration's API permissions page \
-             with admin consent.\n\n\
-             Sign in to approve them now?",
-            missing.join(", ")
-        );
+        let text = tf("scopes.offer_text", &[("feature", &feature), ("scopes", &missing.join(", "))]);
         let label = feature.to_string();
-        self.push(Dialog::confirm("Approve permissions", &text, move |app| app.approve_scopes(Api::Graph, missing, &label)));
+        self.push(Dialog::confirm(&t("scopes.approve_title"), &text, move |app| app.approve_scopes(Api::Graph, missing, &label)));
         true
     }
 
@@ -286,7 +289,7 @@ impl App {
             let _ = tx.send(Box::new(move |app: &mut App| {
                 app.busy -= 1;
                 if app.busy == 0 {
-                    app.status = "Ready".into();
+                    app.status = t("status.ready");
                 }
                 // `work` may have been granted more scopes (see `Auth::ensure_scopes`).
                 app.sync_scopes();
@@ -360,8 +363,8 @@ impl App {
         self.signin_gen += 1;
         let attempt = self.signin_gen;
         if graph.auth.has_refresh_token() {
-            self.status = "Signing in…".into();
-            self.spawn("Signing in…", |g| g.get("/me?$select=displayName,userPrincipalName"), move |app, r| {
+            self.status = t("status.signing_in");
+            self.spawn(t("status.signing_in"), |g| g.get("/me?$select=displayName,userPrincipalName"), move |app, r| {
                 match r {
                     Ok(me) => app.signed_in_as(me),
                     Err(_) => app.device_code(attempt),
@@ -373,14 +376,14 @@ impl App {
     }
 
     fn device_code(&mut self, attempt: u64) {
-        self.status = "Requesting sign-in code…".into();
+        self.status = t("status.requesting_code");
         self.spawn_auth(|a| a.start_device_code(Api::Graph, &[]), move |app, r| {
             if attempt != app.signin_gen {
                 return;
             }
             let dc = match r {
                 Ok(dc) => dc,
-                Err(e) => return app.error("Sign in", e),
+                Err(e) => return app.error(&t("signin.title"), e),
             };
             let id = app.push(Dialog::DeviceCode {
                 message: dc.message.clone(),
@@ -389,7 +392,7 @@ impl App {
                 approval: false,
                 cancelled: dc.cancelled.clone(),
             });
-            app.status = "Waiting for sign-in in your browser…".into();
+            app.status = t("status.waiting_signin");
             app.spawn_auth(
                 move |a| a.poll_device_code(&dc),
                 move |app, r| {
@@ -399,14 +402,14 @@ impl App {
                     }
                     match r {
                         Ok(()) => app.spawn(
-                            "Loading profile…",
+                            t("status.loading_profile"),
                             |g| g.get("/me?$select=displayName,userPrincipalName"),
                             |app, r| match r {
                                 Ok(me) => app.signed_in_as(me),
-                                Err(e) => app.error("Sign in", e),
+                                Err(e) => app.error(&t("signin.title"), e),
                             },
                         ),
-                        Err(e) => app.error("Sign in", e),
+                        Err(e) => app.error(&t("signin.title"), e),
                     }
                 },
             );
@@ -415,7 +418,7 @@ impl App {
 
     pub fn cancel_sign_in(&mut self) {
         self.signin_gen += 1;
-        self.status = "Sign-in cancelled".into();
+        self.status = t("status.signin_cancelled");
     }
 
     /// Adds the scopes the Applications node needs to a Scopes setting saved without them:
@@ -448,7 +451,7 @@ impl App {
             Ok(_) => log::info!("Added to the saved scopes: {}", added.join(" ")),
             Err(e) => log::error!("Could not save the added scopes: {e}"),
         }
-        self.status = "Permissions added".into();
+        self.status = t("status.permissions_added");
     }
 
     fn offer_app_scopes(&mut self, missing: Vec<String>) {
@@ -456,17 +459,10 @@ impl App {
         if let Err(e) = self.settings.save() {
             log::error!("Could not save settings: {e}");
         }
-        let text = format!(
-            "Changing applications needs more Microsoft Graph permissions than this sign-in has: {}.\n\n\
-             A Global Administrator or Privileged Role Administrator can approve them now by signing in \
-             and ticking \"Consent on behalf of your organization\". Until then you can view applications \
-             but not change them.\n\n\
-             Sign in to approve them now? You won't be asked again. An administrator can also grant them \
-             later on the app registration's API permissions page, and they are then added the next time \
-             you sign in.",
-            missing.join(", ")
-        );
-        self.push(Dialog::confirm("Permissions for Applications", &text, move |app| app.approve_scopes(Api::Graph, missing, "Applications")));
+        let text = tf("scopes.apps_text", &[("scopes", &missing.join(", "))]);
+        self.push(Dialog::confirm(&t("scopes.apps_title"), &text, move |app| {
+            app.approve_scopes(Api::Graph, missing, &t("node.applications"))
+        }));
     }
 
     /// Offers, once a session, to approve the Exchange Online permission the Exchange node needs.
@@ -475,13 +471,9 @@ impl App {
             return;
         }
         self.exchange_offered = true;
-        let text = "Managing Exchange needs the Exchange.Manage permission on Office 365 Exchange Online, which \
-                    this app hasn't been granted.\n\n\
-                    A Global Administrator can approve it now by signing in and ticking \"Consent on behalf of \
-                    your organization\", or add it to the app registration's API permissions and grant admin \
-                    consent. Changing mailboxes and distribution lists also needs the Exchange Administrator role.\n\n\
-                    Sign in to approve it now?";
-        self.push(Dialog::confirm("Permissions for Exchange", text, |app| app.approve_scopes(Api::Exchange, Vec::new(), "Exchange")));
+        self.push(Dialog::confirm(&t("scopes.exchange_title"), &t("scopes.exchange_text"), |app| {
+            app.approve_scopes(Api::Exchange, Vec::new(), &t("node.exchange"))
+        }));
     }
 
     /// A device code sign-in asking for the scopes on `api` plus `extra`, for an administrator to
@@ -492,14 +484,14 @@ impl App {
         let current = move |app: &App| attempt == app.approval_gen && session == app.signin_gen;
         let feature = feature.to_string();
         let ask = extra.clone();
-        self.status = "Requesting sign-in code…".into();
+        self.status = t("status.requesting_code");
         self.spawn_auth(move |a| a.start_device_code(api, &ask), move |app, r| {
             if !current(app) {
                 return;
             }
             let dc = match r {
                 Ok(dc) => dc,
-                Err(e) => return app.error("Approve permissions", e),
+                Err(e) => return app.error(&t("scopes.approve_title"), e),
             };
             let id = app.push(Dialog::DeviceCode {
                 message: dc.message.clone(),
@@ -508,7 +500,7 @@ impl App {
                 approval: true,
                 cancelled: dc.cancelled.clone(),
             });
-            app.status = "Waiting for approval in your browser…".into();
+            app.status = t("status.waiting_approval");
             app.spawn_auth(
                 move |a| a.poll_device_code(&dc),
                 move |app, r| {
@@ -525,16 +517,16 @@ impl App {
                                 app.save_scopes(&extra);
                             }
                             // An administrator other than the person signed in may have approved them.
-                            app.spawn("Loading profile…", |g| g.get("/me?$select=displayName,userPrincipalName"), |app, r| {
+                            app.spawn(t("status.loading_profile"), |g| g.get("/me?$select=displayName,userPrincipalName"), |app, r| {
                                 match r {
                                     Ok(me) => app.signed_in_as(me),
-                                    Err(e) => app.error("Sign in", e),
+                                    Err(e) => app.error(&t("signin.title"), e),
                                 }
                             });
                         }
                         Err(e) => app.error(
-                            "Approve permissions",
-                            format!("The permissions for {feature} were not added, and you are still signed in as before.\n\n{e}"),
+                            &t("scopes.approve_title"),
+                            tf("scopes.not_added", &[("feature", &feature), ("error", &e)]),
                         ),
                     }
                 },
@@ -544,16 +536,16 @@ impl App {
 
     pub fn cancel_approval(&mut self) {
         self.approval_gen += 1;
-        self.status = "Permissions not added".into();
+        self.status = t("status.permissions_not_added");
     }
 
     fn signed_in_as(&mut self, me: Value) {
         self.signed_in = true;
         self.account = me["userPrincipalName"].as_str().unwrap_or("").to_string();
         log::info!("Signed in as {}", self.account);
-        self.status = format!("Signed in as {}", self.account);
+        self.status = tf("status.signed_in_as", &[("account", &self.account)]);
         self.spawn(
-            "Loading tenant…",
+            t("status.loading_tenant"),
             |g| {
                 let org = g.get("/organization?$select=displayName")?;
                 let domains = g.list("/domains?$select=id,isVerified,isDefault")?;
@@ -566,7 +558,7 @@ impl App {
                     d.sort_by_key(|d| d["isDefault"] != true);
                     app.domains = d.iter().filter_map(|d| d["id"].as_str().map(str::to_string)).collect();
                 }
-                Err(e) => app.error("Load tenant", e),
+                Err(e) => app.error(&t("tenant.load_title"), e),
             },
         );
         if self.node.endpoint().is_some() {
@@ -584,7 +576,7 @@ impl App {
         self.account.clear();
         self.tenant_name.clear();
         self.clear_lists();
-        self.status = "Signed out".into();
+        self.status = t("status.signed_out");
     }
 
     // ----- data -----------------------------------------------------------
@@ -593,7 +585,7 @@ impl App {
         if self.node == node {
             return;
         }
-        log::debug!("Console node selected: {}", node.title());
+        log::debug!("Console node selected: {node:?}");
         self.node = node;
         self.filter.clear();
         self.sort = None;
@@ -620,14 +612,14 @@ impl App {
         self.loading.insert(node);
         let session = self.signin_gen;
         self.spawn(
-            format!("Loading {}…", node.title().to_lowercase()),
+            tf("status.loading_list", &[("list", &node.list_name())]),
             move |g| match source {
                 Source::Graph(path) => g.list_capped(path),
                 Source::Exchange => crate::exchange::list(g, node),
             },
             move |app, r| {
                 if session != app.signin_gen {
-                    log::debug!("Dropping {} loaded before signing out", node.title());
+                    log::debug!("Dropping {node:?} loaded before signing out");
                     return;
                 }
                 app.loading.remove(&node);
@@ -636,13 +628,13 @@ impl App {
                         rows.retain(|v| node.keep(v));
                         let first = node.columns()[0].get;
                         rows.sort_by_cached_key(|v| first(v).to_lowercase());
-                        let noun = node.title().to_lowercase();
+                        let list = node.list_name();
                         app.status = if truncated {
-                            format!("{} {noun} loaded; the list stops there, so some are missing", rows.len())
+                            tf("status.loaded_truncated", &[("count", &rows.len()), ("list", &list)])
                         } else {
-                            format!("{} {noun} loaded", rows.len())
+                            tf("status.loaded", &[("count", &rows.len()), ("list", &list)])
                         };
-                        log::info!("{}", app.status);
+                        log::info!("{node:?}: {} loaded{}", rows.len(), if truncated { ", truncated" } else { "" });
                         app.errors.remove(&node);
                         if truncated {
                             app.truncated.insert(node);
@@ -656,8 +648,8 @@ impl App {
                         if e.downcast_ref::<NeedsConsent>().is_some() {
                             app.offer_exchange_consent();
                         }
-                        app.status = format!("Could not load {}", node.title().to_lowercase());
-                        log::error!("Loading {} failed: {e}", node.title());
+                        app.status = tf("status.load_failed", &[("list", &node.list_name())]);
+                        log::error!("Loading {node:?} failed: {e}");
                         app.errors.insert(node, e.to_string());
                     }
                 }
@@ -670,15 +662,15 @@ impl App {
 
     /// Why the list for `node` may not hold every object, if it may not.
     pub fn incomplete_list(&self, node: Node) -> Option<String> {
-        let noun = node.title().to_lowercase();
+        let list = node.list_name();
         if self.loading.contains(&node) {
-            Some(format!("The {noun} are still loading."))
+            Some(tf("list.still_loading", &[("list", &list)]))
         } else if self.errors.contains_key(&node) {
-            Some(format!("The {noun} did not load. Refresh the list and try again."))
+            Some(tf("list.load_failed", &[("list", &list)]))
         } else if self.truncated.contains(&node) {
-            Some(format!("Only the first {} {noun} were loaded.", crate::graph::MAX_ITEMS))
+            Some(tf("list.truncated", &[("count", &crate::graph::MAX_ITEMS), ("list", &list)]))
         } else if !self.data.contains_key(&node) {
-            Some(format!("The {noun} have not been loaded."))
+            Some(tf("list.not_loaded", &[("list", &list)]))
         } else {
             None
         }
@@ -862,28 +854,31 @@ impl App {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                let file = ui.menu_button("File", |ui| {
-                    if ui.button("Settings…").clicked() {
+                let file = ui.menu_button(t("menu.file"), |ui| {
+                    if ui.button(t("menu.settings")).clicked() {
                         self.open_settings();
+                    }
+                    if ui.button(self.language_menu_label()).clicked() {
+                        self.open_language();
                     }
                     ui.separator();
                     if self.signed_in {
-                        if ui.button("Sign out").clicked() {
+                        if ui.button(t("menu.sign_out")).clicked() {
                             self.sign_out();
                         }
-                    } else if ui.button("Sign in").clicked() {
+                    } else if ui.button(t("menu.sign_in")).clicked() {
                         self.sign_in();
                     }
                     ui.separator();
-                    if ui.button("Exit").clicked() {
+                    if ui.button(t("menu.exit")).clicked() {
                         self.quit = true;
                     }
                 });
                 self.file_menu_id = Some(file.response.id);
-                ui.menu_button("Action", |ui| {
+                ui.menu_button(t("menu.action"), |ui| {
                     let acts = self.all_actions();
                     if acts.is_empty() {
-                        ui.label("No actions available");
+                        ui.label(t("menu.no_actions"));
                     }
                     for act in acts {
                         if self.action_button(ui, act).clicked() {
@@ -891,29 +886,29 @@ impl App {
                         }
                     }
                 });
-                ui.menu_button("View", |ui| {
-                    if ui.add_enabled(self.signed_in, egui::Button::new("Refresh").shortcut_text("F5")).clicked() {
+                ui.menu_button(t("menu.view"), |ui| {
+                    if ui.add_enabled(self.signed_in, egui::Button::new(t("act.refresh")).shortcut_text("F5")).clicked() {
                         self.refresh();
                     }
-                    if ui.add(egui::Button::new("Filter…").shortcut_text(ui.ctx().format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F)))).clicked() {
+                    if ui.add(egui::Button::new(t("menu.filter")).shortcut_text(ui.ctx().format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F)))).clicked() {
                         self.focus_filter = true;
                     }
                     ui.separator();
-                    ui.checkbox(&mut self.show_actions, "Actions pane");
+                    ui.checkbox(&mut self.show_actions, t("menu.actions_pane"));
                     ui.separator();
-                    ui.label("Theme");
+                    ui.label(t("menu.theme"));
                     egui::widgets::global_theme_preference_buttons(ui);
                     ui.separator();
-                    ui.label("Zoom: Ctrl/⌘ + plus, minus or 0");
+                    ui.label(t("menu.zoom"));
                 });
-                ui.menu_button("Help", |ui| {
-                    if ui.add(egui::Button::new("Keyboard shortcuts").shortcut_text("F1")).clicked() {
+                ui.menu_button(t("menu.help"), |ui| {
+                    if ui.add(egui::Button::new(t("menu.shortcuts")).shortcut_text("F1")).clicked() {
                         self.push(Dialog::Help);
                     }
-                    if ui.button("Check for updates…").clicked() {
+                    if ui.button(t("menu.check_updates")).clicked() {
                         self.check_for_updates(true);
                     }
-                    if ui.button("About Graphical Cloud Management").clicked() {
+                    if ui.button(t("menu.about")).clicked() {
                         self.push(Dialog::About);
                     }
                 });
@@ -945,11 +940,11 @@ impl App {
                 tool(ui, self, "🗋", Act::Properties);
                 tool(ui, self, "🗑", Act::Delete);
                 ui.separator();
-                let label = ui.label("Filter:");
+                let label = ui.label(t("toolbar.filter"));
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut self.filter)
                         .id(egui::Id::new("filter"))
-                        .hint_text(format!("Type to filter {}…", self.node.title().to_lowercase()))
+                        .hint_text(tf("toolbar.filter_hint", &[("list", &self.node.list_name())]))
                         .desired_width(260.0),
                 ).labelled_by(label.id);
                 if self.focus_filter {
@@ -962,7 +957,7 @@ impl App {
                 if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     self.set_sel(0);
                 }
-                if !self.filter.is_empty() && ui.button("✖").on_hover_text("Clear filter").clicked() {
+                if !self.filter.is_empty() && ui.button("✖").on_hover_text(t("toolbar.clear_filter")).clicked() {
                     self.filter.clear();
                     self.view_dirty = true;
                 }
@@ -973,23 +968,31 @@ impl App {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                if self.busy > 0 {
+                if self.busy > 0 || self.translation.is_some() {
                     ui.spinner();
                 }
-                ui.label(&self.status);
+                match &self.translation {
+                    Some(job) if self.busy == 0 => {
+                        let percent = (job.fraction() * 100.0).round() as u32;
+                        ui.label(tf("language.progress", &[("percent", &percent)]));
+                    }
+                    _ => {
+                        ui.label(&self.status);
+                    }
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if self.signed_in {
                         ui.label(format!("👤 {}", self.account));
                     } else {
-                        ui.label("Not signed in");
+                        ui.label(t("status.not_signed_in"));
                     }
                     ui.separator();
                     if self.node.endpoint().is_some() {
                         let total = self.data.get(&self.node).map_or(0, Vec::len);
                         if self.view.len() == total {
-                            ui.label(format!("{total} {}", self.node.title().to_lowercase()));
+                            ui.label(tf("status.count", &[("count", &total), ("list", &self.node.list_name())]));
                         } else {
-                            ui.label(format!("{} of {total} shown", self.view.len()));
+                            ui.label(tf("status.shown", &[("shown", &self.view.len()), ("total", &total)]));
                         }
                     }
                 });
@@ -999,7 +1002,7 @@ impl App {
 
     fn tree_panel(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("tree").resizable(true).default_size(230.0).min_size(160.0).show(ui, |ui| {
-            pane_heading(ui, "Console tree", self.pane == Pane::Tree);
+            pane_heading(ui, &t("pane.tree"), self.pane == Pane::Tree);
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let visible: Vec<(Node, usize)> = TREE
                     .iter()
@@ -1029,16 +1032,17 @@ impl App {
                         let title = if node == Node::Root && !self.tenant_name.is_empty() {
                             format!("{} ({})", node.title(), self.tenant_name)
                         } else {
-                            node.title().to_string()
+                            node.title()
                         };
                         let r = ui.selectable_label(self.node == node, format!("{marker} {} {title}", node.icon()));
                         r.widget_info(|| {
-                            let state = match (node.has_children(), self.expanded.contains(&node)) {
-                                (false, _) => "",
-                                (true, true) => ", expanded",
-                                (true, false) => ", collapsed",
+                            let key = match (node.has_children(), self.expanded.contains(&node)) {
+                                (false, _) => "pane.tree_item",
+                                (true, true) => "pane.tree_item_expanded",
+                                (true, false) => "pane.tree_item_collapsed",
                             };
-                            egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, self.node == node, format!("{title}{state}, level {}", depth + 1))
+                            let text = tf(key, &[("title", &title), ("level", &(depth + 1))]);
+                            egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, self.node == node, text)
                         });
                         if r.clicked() {
                             self.select_node(node);
@@ -1135,12 +1139,12 @@ impl App {
 
     fn actions_panel(&mut self, ui: &mut egui::Ui) {
         egui::Panel::right("actions").resizable(true).default_size(230.0).min_size(170.0).show(ui, |ui| {
-            pane_heading(ui, "Actions", self.pane == Pane::Actions);
+            pane_heading(ui, &t("pane.actions"), self.pane == Pane::Actions);
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
                     let mut first = true;
                     let mut any_focus = false;
-                    section(ui, self.node.title());
+                    section(ui, &self.node.title());
                     for act in node_actions(self.node) {
                         let r = self.action_button(ui, act);
                         any_focus |= r.has_focus();
@@ -1153,7 +1157,7 @@ impl App {
                     if let Some(obj) = self.selected() {
                         let name = self.node.object_name(obj);
                         ui.add_space(6.0);
-                        section(ui, if name.is_empty() { "Selected item" } else { &name });
+                        section(ui, &if name.is_empty() { t("pane.selected_item") } else { name });
                         for act in item_actions(self.node) {
                             let r = self.action_button(ui, act);
                             any_focus |= r.has_focus();
@@ -1177,20 +1181,20 @@ impl App {
             let heading = if self.node == Node::Root && !self.tenant_name.is_empty() {
                 format!("{} — {}", self.node.title(), self.tenant_name)
             } else {
-                self.node.title().to_string()
+                self.node.title()
             };
             pane_heading(ui, &heading, self.pane == Pane::List);
             if !self.signed_in && self.node.endpoint().is_some() {
                 ui.add_space(12.0);
-                ui.label("You are not signed in.");
-                if ui.button("Sign in…").clicked() {
+                ui.label(t("central.not_signed_in"));
+                if ui.button(t("central.sign_in")).clicked() {
                     self.sign_in();
                 }
                 return;
             }
             if let Some(err) = self.errors.get(&self.node).cloned() {
                 ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {err}"));
-                if ui.button("Retry").clicked() {
+                if ui.button(t("central.retry")).clicked() {
                     self.refresh();
                 }
                 return;
@@ -1198,7 +1202,7 @@ impl App {
             if self.loading.contains(&self.node) && !self.data.contains_key(&self.node) {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(format!("Loading {}…", self.node.title().to_lowercase()));
+                    ui.label(tf("status.loading_list", &[("list", &self.node.list_name())]));
                 });
                 return;
             }
@@ -1216,7 +1220,7 @@ impl App {
         let rows = self.data.get(&self.node).unwrap_or(&empty);
         if self.view.is_empty() {
             ui.add_space(8.0);
-            ui.label(if self.filter.is_empty() { "There are no items to show in this view." } else { "No items match the filter." });
+            ui.label(t(if self.filter.is_empty() { "central.empty" } else { "central.no_match" }));
             return;
         }
         let text_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
@@ -1254,21 +1258,22 @@ impl App {
         let want_focus = self.focus_pane == Some(Pane::List);
         let mut focus_taken = false;
         let view = &self.view;
+        let titles: Vec<String> = cols.iter().map(|c| t(c.title)).collect();
 
         table
             .header(text_height, |mut header| {
-                for (i, c) in cols.iter().enumerate() {
+                for (i, title) in titles.iter().enumerate() {
                     header.col(|ui| {
                         let arrow = match sort {
                             Some((ci, true)) if ci == i => " ⏶",
                             Some((ci, false)) if ci == i => " ⏷",
                             _ => "",
                         };
-                        let r = ui.add(egui::Button::new(RichText::new(format!("{}{arrow}", c.title)).bold()).frame(false));
+                        let r = ui.add(egui::Button::new(RichText::new(format!("{title}{arrow}")).bold()).frame(false));
                         if r.clicked() {
                             sort_click = Some(i);
                         }
-                        r.on_hover_text("Sort by this column");
+                        r.on_hover_text(t("central.sort"));
                     });
                 }
             })
@@ -1287,7 +1292,8 @@ impl App {
                                 r.widget_info(|| {
                                     let summary: Vec<String> = cols
                                         .iter()
-                                        .map(|c| format!("{}: {}", c.title, (c.get)(obj)))
+                                        .zip(&titles)
+                                        .map(|(c, title)| format!("{title}: {}", (c.get)(obj)))
                                         .collect();
                                     egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, is_sel, summary.join(", "))
                                 });
@@ -1436,15 +1442,15 @@ fn section(ui: &mut egui::Ui, title: &str) {
 /// Synthetic rows describing the children of a container node, as MMC shows them.
 fn child_rows(node: Node) -> Vec<Value> {
     let describe = |n: Node| match n {
-        Node::Users => "Create, onboard, offboard and edit user accounts; reset passwords; manage authentication methods and review sign-ins",
-        Node::Groups => "Manage groups, membership, owners, licences and directory role assignments",
-        Node::Devices => "View, enable/disable and delete registered devices",
-        Node::Applications => "Manage connected applications, who can use them and the permissions granted to them",
-        Node::Exchange => "Manage Exchange Online mailboxes and distribution lists",
-        Node::Mailboxes => "Create shared mailboxes; set mailbox permissions, forwarding and automatic replies",
-        Node::DistributionLists => "Create and delete distribution lists and manage their members",
-        Node::Licences => "View subscriptions and assign or remove licences",
-        _ => "",
+        Node::Users => t("node.users_about"),
+        Node::Groups => t("node.groups_about"),
+        Node::Devices => t("node.devices_about"),
+        Node::Applications => t("node.applications_about"),
+        Node::Exchange => t("node.exchange_about"),
+        Node::Mailboxes => t("node.mailboxes_about"),
+        Node::DistributionLists => t("node.distribution_lists_about"),
+        Node::Licences => t("node.licences_about"),
+        Node::Root => String::new(),
     };
     TREE.iter()
         .enumerate()

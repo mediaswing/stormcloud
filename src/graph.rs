@@ -1,6 +1,7 @@
 //! Minimal blocking Microsoft Graph client.
 
 use crate::auth::{Api, Auth};
+use crate::i18n::tf;
 use anyhow::{bail, Result};
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::{Method, StatusCode};
@@ -104,7 +105,8 @@ impl Graph {
             }
             return Ok(serde_json::from_str(&text)?);
         }
-        bail!("{} is throttling requests; try again shortly.", if api == Api::Graph { "Microsoft Graph" } else { "Exchange Online" })
+        let service = if api == Api::Graph { "Microsoft Graph" } else { "Exchange Online" };
+        bail!(tf("graph.throttled", &[("service", &service)]))
     }
 
     pub fn get(&self, path: &str) -> Result<Value> {

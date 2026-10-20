@@ -12,6 +12,7 @@ use crate::auth::NeedsScopes;
 use crate::config::{AUDIT_LOG_SCOPE, AUTH_METHODS_SCOPE};
 use crate::dialogs::{Dialog, Field, Form};
 use crate::graph::Graph;
+use crate::i18n::{t, tf};
 use crate::model::{datetime, s, yes_no};
 use crate::sheets::{SheetRow, TabBody, TabKind, TabOp};
 use anyhow::{anyhow, Result};
@@ -40,29 +41,15 @@ pub fn explain(e: anyhow::Error, need: Need) -> anyhow::Error {
     }
     let text = e.to_string();
     if text.contains("RequestFromNonPremiumTenant") || text.contains("premium license") {
-        return anyhow!(
-            "Sign-in logs, sign-in activity and MFA registration details need a Microsoft Entra ID P1 or P2 \
-             licence in the tenant.\n\nMicrosoft Graph said: {text}"
-        );
+        return anyhow!(tf("security.needs_premium", &[("error", &text)]));
     }
     if text.contains("(403)") {
-        let roles = match need {
-            Need::Reports => {
-                "Reading sign-in logs and registration details needs one of these roles: Reports Reader, \
-                 Security Reader, Security Operator, Security Administrator or Global Reader."
-            }
-            Need::Methods => {
-                "Managing another user's authentication methods needs the Authentication Administrator role, \
-                 or Privileged Authentication Administrator when the user is an administrator. When you \
-                 change your own methods, Microsoft also wants an MFA sign-in in the last 10 minutes: sign \
-                 out and in again, then retry."
-            }
-            Need::Users => {
-                "This needs a role that can manage the user, such as User Administrator, Helpdesk \
-                 Administrator (for non-administrators) or Privileged Authentication Administrator."
-            }
-        };
-        return anyhow!("Your account isn't allowed to do this. {roles}\n\nMicrosoft Graph said: {text}");
+        let roles = t(match need {
+            Need::Reports => "security.roles_reports",
+            Need::Methods => "security.roles_methods",
+            Need::Users => "security.roles_users",
+        });
+        return anyhow!(tf("security.not_allowed", &[("roles", &roles), ("error", &text)]));
     }
     e
 }
@@ -70,15 +57,15 @@ pub fn explain(e: anyhow::Error, need: Need) -> anyhow::Error {
 /// A short reason for a part of the overview that couldn't be read.
 fn unavailable(e: &anyhow::Error) -> String {
     if let Some(NeedsScopes(missing)) = e.downcast_ref::<NeedsScopes>() {
-        return format!("Not available: needs the {} permission", missing.join(", "));
+        return tf("security.unavailable_scope", &[("scopes", &missing.join(", "))]);
     }
     let text = e.to_string();
     if text.contains("RequestFromNonPremiumTenant") || text.contains("premium license") {
-        "Not available: needs Microsoft Entra ID P1 or P2".into()
+        t("security.unavailable_premium")
     } else if text.contains("(403)") {
-        "Not available: your role can't read this (for example Reports Reader or Global Reader can)".into()
+        t("security.unavailable_role")
     } else {
-        format!("Not available: {text}")
+        tf("security.unavailable", &[("error", &text)])
     }
 }
 
@@ -144,71 +131,75 @@ pub fn mask_email(address: &str) -> String {
 
 /// A method's name and details for the table, with phone numbers and addresses masked.
 pub fn describe_method(v: &Value) -> (String, String) {
-    let opt = |label: &str, key: &str| {
+    // A property's value, or with `label_key` the text for that key with the value in it.
+    let opt = |label_key: Option<&str>, key: &str| {
         let value = s(v, key);
-        if value.is_empty() { None } else { Some(format!("{label}{value}")) }
+        match label_key {
+            _ if value.is_empty() => None,
+            Some(label) => Some(tf(label, &[("value", &value)])),
+            None => Some(value),
+        }
     };
     let join = |parts: Vec<Option<String>>| parts.into_iter().flatten().collect::<Vec<_>>().join(" · ");
     match method_type(v) {
-        "passwordAuthenticationMethod" => ("Password".into(), "Can't be shown or removed; reset it instead".into()),
+        "passwordAuthenticationMethod" => (t("method.password"), t("method.password_details")),
         "microsoftAuthenticatorAuthenticationMethod" => (
-            "Microsoft Authenticator".into(),
-            join(vec![opt("", "displayName"), opt("", "deviceTag"), opt("App version ", "phoneAppVersion")]),
+            t("method.authenticator"),
+            join(vec![opt(None, "displayName"), opt(None, "deviceTag"), opt(Some("method.app_version"), "phoneAppVersion")]),
         ),
         "phoneAuthenticationMethod" => {
-            let kind = match s(v, "phoneType").as_str() {
-                "mobile" => "Mobile phone",
-                "alternateMobile" => "Alternate mobile phone",
-                "office" => "Office phone",
-                _ => "Phone",
-            };
-            let sms = if s(v, "smsSignInState") == "ready" { " · SMS sign-in enabled" } else { "" };
-            (kind.into(), format!("Ending {}{sms}", mask_phone(&s(v, "phoneNumber"))))
+            let kind = t(match s(v, "phoneType").as_str() {
+                "mobile" => "method.mobile_phone",
+                "alternateMobile" => "method.alternate_mobile_phone",
+                "office" => "method.office_phone",
+                _ => "method.phone",
+            });
+            let mut details = tf("method.ending", &[("number", &mask_phone(&s(v, "phoneNumber")))]);
+            if s(v, "smsSignInState") == "ready" {
+                details = format!("{details} · {}", t("method.sms_sign_in"));
+            }
+            (kind, details)
         }
         "fido2AuthenticationMethod" => {
-            ("Passkey (FIDO2)".into(), join(vec![opt("", "displayName"), opt("Model ", "model")]))
+            (t("method.passkey"), join(vec![opt(None, "displayName"), opt(Some("method.model"), "model")]))
         }
         "windowsHelloForBusinessAuthenticationMethod" => (
-            "Windows Hello for Business".into(),
-            join(vec![opt("", "displayName"), opt("Key strength ", "keyStrength")]),
+            t("method.windows_hello"),
+            join(vec![opt(None, "displayName"), opt(Some("method.key_strength"), "keyStrength")]),
         ),
-        "emailAuthenticationMethod" => ("Email (password reset)".into(), mask_email(&s(v, "emailAddress"))),
-        "softwareOathAuthenticationMethod" => ("Authenticator app code (OATH)".into(), String::new()),
+        "emailAuthenticationMethod" => (t("method.email"), mask_email(&s(v, "emailAddress"))),
+        "softwareOathAuthenticationMethod" => (t("method.oath"), String::new()),
         "temporaryAccessPassAuthenticationMethod" => {
-            let mut parts = vec![format!("{} minutes", v["lifetimeInMinutes"].as_i64().unwrap_or(0))];
+            let mut parts = vec![tf("method.minutes", &[("count", &v["lifetimeInMinutes"].as_i64().unwrap_or(0))])];
             if v["isUsableOnce"] == true {
-                parts.push("one use".into());
+                parts.push(t("method.one_use"));
             }
-            parts.push(if v["isUsable"] == true { "usable now".into() } else { format!("not usable: {}", s(v, "methodUsabilityReason")) });
-            ("Temporary Access Pass".into(), parts.join(" · "))
+            parts.push(if v["isUsable"] == true {
+                t("method.usable_now")
+            } else {
+                tf("method.not_usable", &[("reason", &s(v, "methodUsabilityReason"))])
+            });
+            (t("method.tap"), parts.join(" · "))
         }
         "platformCredentialAuthenticationMethod" => {
-            ("Platform credential".into(), join(vec![opt("", "displayName"), opt("", "platform")]))
+            (t("method.platform_credential"), join(vec![opt(None, "displayName"), opt(None, "platform")]))
         }
-        "externalAuthenticationMethod" => ("External MFA".into(), opt("", "displayName").unwrap_or_default()),
+        "externalAuthenticationMethod" => (t("method.external"), opt(None, "displayName").unwrap_or_default()),
         other => (other.trim_end_matches("AuthenticationMethod").to_string(), String::new()),
     }
 }
 
 /// What deleting a method does, for its confirmation.
-fn delete_effect(v: &Value) -> &'static str {
-    match method_type(v) {
-        "phoneAuthenticationMethod" => {
-            "They can no longer use this number for MFA or password reset. A number that is their default \
-             MFA method can't be deleted until they choose another default; a mobile number can't be \
-             deleted while an alternate mobile number remains."
-        }
-        "microsoftAuthenticatorAuthenticationMethod" => {
-            "Notifications and codes from the app on that device stop working. They can register the app again."
-        }
-        "fido2AuthenticationMethod" => "They can no longer sign in with this security key or passkey.",
-        "windowsHelloForBusinessAuthenticationMethod" => {
-            "Windows Hello sign-in on that device stops working until it is set up again."
-        }
-        "emailAuthenticationMethod" => "They can no longer use this address to reset their password.",
-        "temporaryAccessPassAuthenticationMethod" => "The pass can no longer be used to sign in.",
-        _ => "They can no longer sign in with it.",
-    }
+fn delete_effect(v: &Value) -> String {
+    t(match method_type(v) {
+        "phoneAuthenticationMethod" => "method.delete_phone",
+        "microsoftAuthenticatorAuthenticationMethod" => "method.delete_authenticator",
+        "fido2AuthenticationMethod" => "method.delete_passkey",
+        "windowsHelloForBusinessAuthenticationMethod" => "method.delete_windows_hello",
+        "emailAuthenticationMethod" => "method.delete_email",
+        "temporaryAccessPassAuthenticationMethod" => "method.delete_tap",
+        _ => "method.delete_other",
+    })
 }
 
 /// The order MFA methods are deleted in: phone numbers last, as one that is the default method
@@ -239,7 +230,7 @@ fn methods_table(methods: Vec<Value>) -> TabBody {
         .collect();
     // The password first, then the rest by name.
     rows.sort_by_key(|r| (method_type(&r.data) != "passwordAuthenticationMethod", r.cells[0].clone()));
-    TabBody::Table { headers: vec!["Method", "Details", "Added (UTC)"], rows }
+    TabBody::Table { headers: vec!["col.method", "col.details", "col.added_utc"], rows }
 }
 
 // ----- sign-ins ----------------------------------------------------------------
@@ -249,69 +240,45 @@ fn methods_table(methods: Vec<Value>) -> TabBody {
 const INTERRUPTS: [i64; 8] = [50058, 50072, 50074, 50076, 50079, 50125, 50140, 50199];
 
 /// What a sign-in error code usually means, and what to do about it.
-pub fn advice(code: i64) -> Option<&'static str> {
-    Some(match code {
-        50126 => "Wrong user name or password. If the user is sure of their password, reset it.",
-        50053 => {
-            "The account is locked after too many failed attempts (smart lockout), or sign-ins from that IP \
-             address are blocked. It unlocks by itself after the lockout period. Many attempts the user \
-             didn't make can mean someone is guessing the password."
-        }
-        50057 => "The account is disabled. Enable it if the user should be able to sign in.",
-        50055 => "The password has expired. Reset it, or have the user change it.",
-        50144 => "The user's Active Directory password has expired. Change it on-premises.",
-        50056 => {
-            "No password is stored for this user in Microsoft Entra ID. Set one, or check password hash \
-             synchronisation for a synced user."
-        }
-        50034 => "No account with that user name is in this directory: check the name the user types.",
-        50074 | 50076 => "MFA was required for this sign-in. This is normal, and is usually followed by a successful sign-in.",
-        500121 => {
-            "MFA failed: the user denied or didn't answer the prompt, or entered a wrong code. Prompts the \
-             user didn't expect can mean someone else knows their password."
-        }
-        50072 | 50079 => {
-            "The user has to register for MFA before they can continue. A Temporary Access Pass lets them \
-             sign in to register."
-        }
-        53003 => {
-            "Blocked by Conditional Access. The sign-in's details list the policies that applied, if this \
-             app can read Conditional Access data."
-        }
-        53000 => "Conditional Access requires a compliant device, and this device isn't marked compliant.",
-        53001 => "Conditional Access requires a Microsoft Entra hybrid joined device.",
-        50097 => "Device authentication is required for this sign-in.",
-        50105 => "The user isn't assigned to this application, which requires assignment. Assign them under Applications.",
-        50133 | 50173 => {
-            "The session is no longer valid because the password changed or sessions were revoked. Signing in again fixes it."
-        }
-        70044 => {
-            "The session expired, or a Conditional Access sign-in frequency setting asked for a new sign-in. \
-             Signing in again fixes it."
-        }
-        50140 => "The \"Stay signed in?\" question interrupted the sign-in. This is normal.",
-        50158 => "An external security challenge, such as a third-party MFA provider, wasn't completed.",
-        50199 => "The user was asked to confirm the sign-in for security reasons. This is normal.",
-        50058 => "Silent sign-in found no session to use. The app then usually asks the user to sign in, which is normal.",
-        65001 => "The user, or an administrator, hasn't consented to the permissions the application asks for.",
-        90094 => "The application needs an administrator to grant consent.",
-        50020 => {
-            "The account's identity provider isn't known to this tenant: often a guest who wasn't invited or \
-             has been removed."
-        }
+pub fn advice(code: i64) -> Option<String> {
+    Some(t(match code {
+        50126 => "advice.50126",
+        50053 => "advice.50053",
+        50057 => "advice.50057",
+        50055 => "advice.50055",
+        50144 => "advice.50144",
+        50056 => "advice.50056",
+        50034 => "advice.50034",
+        50074 | 50076 => "advice.50074",
+        500121 => "advice.500121",
+        50072 | 50079 => "advice.50072",
+        53003 => "advice.53003",
+        53000 => "advice.53000",
+        53001 => "advice.53001",
+        50097 => "advice.50097",
+        50105 => "advice.50105",
+        50133 | 50173 => "advice.50133",
+        70044 => "advice.70044",
+        50140 => "advice.50140",
+        50158 => "advice.50158",
+        50199 => "advice.50199",
+        50058 => "advice.50058",
+        65001 => "advice.65001",
+        90094 => "advice.90094",
+        50020 => "advice.50020",
         _ => return None,
-    })
+    }))
 }
 
 /// "Success", "Interrupted (50140)" or "Failed (50126)".
 pub fn sign_in_result(v: &Value) -> String {
     let code = v["status"]["errorCode"].as_i64().unwrap_or(0);
     if code == 0 {
-        "Success".into()
+        t("signins.success")
     } else if INTERRUPTS.contains(&code) {
-        format!("Interrupted ({code})")
+        tf("signins.interrupted", &[("code", &code)])
     } else {
-        format!("Failed ({code})")
+        tf("signins.failed", &[("code", &code)])
     }
 }
 
@@ -324,47 +291,46 @@ fn location(v: &Value) -> String {
         .join(", ")
 }
 
-fn conditional_access(status: &str) -> &str {
+fn conditional_access(status: &str) -> String {
     match status {
-        "success" => "Passed",
-        "failure" => "Failed",
-        "notApplied" => "Not applied",
-        "" => "",
-        other => other,
+        "success" => t("signins.ca_passed"),
+        "failure" => t("signins.ca_failed"),
+        "notApplied" => t("signins.ca_not_applied"),
+        other => other.to_string(),
     }
 }
 
 /// The full details of a sign-in, for its Details dialog.
 pub fn sign_in_details(v: &Value) -> String {
     let code = v["status"]["errorCode"].as_i64().unwrap_or(0);
+    // A line of the details: the text for `key`, such as "User: {value}", with `value` in it.
+    let line = |key: &str, value: &dyn std::fmt::Display| tf(key, &[("value", value)]);
     let mut lines = vec![
-        format!("Date (UTC): {}", datetime(&v["createdDateTime"])),
-        format!("User: {}", s(v, "userPrincipalName")),
-        format!("Application: {}", s(v, "appDisplayName")),
-        format!("Resource: {}", s(v, "resourceDisplayName")),
-        format!("Result: {}", sign_in_result(v)),
+        line("signins.date", &datetime(&v["createdDateTime"])),
+        line("signins.user", &s(v, "userPrincipalName")),
+        line("signins.application", &s(v, "appDisplayName")),
+        line("signins.resource", &s(v, "resourceDisplayName")),
+        line("signins.result", &sign_in_result(v)),
     ];
-    for (label, key) in [("Reason", "failureReason"), ("Additional details", "additionalDetails")] {
+    for (label, key) in [("signins.reason", "failureReason"), ("signins.additional", "additionalDetails")] {
         let text = s(&v["status"], key);
         if !text.is_empty() && code != 0 {
-            lines.push(format!("{label}: {text}"));
+            lines.push(line(label, &text));
         }
     }
     if let Some(a) = advice(code) {
-        lines.push(format!("What it means: {a}"));
+        lines.push(line("signins.meaning", &a));
     }
     let d = &v["deviceDetail"];
+    let device = [s(d, "displayName"), s(d, "operatingSystem"), s(d, "browser")].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(", ");
     lines.extend([
-        format!("Interactive: {}", yes_no(&v["isInteractive"])),
-        format!("Client app: {}", s(v, "clientAppUsed")),
-        format!("IP address: {}", s(v, "ipAddress")),
-        format!("Location: {}", location(v)),
-        format!(
-            "Device: {}",
-            [s(d, "displayName"), s(d, "operatingSystem"), s(d, "browser")].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(", ")
-        ),
-        format!("Device compliant: {} · managed: {}", yes_no(&d["isCompliant"]), yes_no(&d["isManaged"])),
-        format!("Conditional Access: {}", conditional_access(&s(v, "conditionalAccessStatus"))),
+        line("signins.interactive", &yes_no(&v["isInteractive"])),
+        line("signins.client_app", &s(v, "clientAppUsed")),
+        line("signins.ip", &s(v, "ipAddress")),
+        line("signins.location", &location(v)),
+        line("signins.device", &device),
+        tf("signins.device_state", &[("compliant", &yes_no(&d["isCompliant"])), ("managed", &yes_no(&d["isManaged"]))]),
+        line("signins.conditional_access", &conditional_access(&s(v, "conditionalAccessStatus"))),
     ]);
     match v["appliedConditionalAccessPolicies"].as_array() {
         Some(policies) => {
@@ -374,30 +340,25 @@ pub fn sign_in_details(v: &Value) -> String {
                 .filter(|p| !matches!(s(p, "result").as_str(), "notEnabled" | "notApplied"))
                 .map(|p| {
                     let grants = p["enforcedGrantControls"].as_array().map(|g| g.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default();
-                    let grants = if grants.is_empty() { String::new() } else { format!(" (requires {grants})") };
+                    let grants = if grants.is_empty() { String::new() } else { format!(" ({})", tf("signins.requires", &[("grants", &grants)])) };
                     format!("  • {}: {}{grants}", s(p, "displayName"), s(p, "result"))
                 })
                 .collect();
             if relevant.is_empty() {
-                lines.push("Policies: none applied".into());
+                lines.push(t("signins.no_policies"));
             } else {
-                lines.push("Policies:".into());
+                lines.push(t("signins.policies"));
                 lines.extend(relevant);
             }
         }
-        None => lines.push(
-            "Policies: not shown. Microsoft Graph only lists them when this app has Policy.Read.ConditionalAccess \
-             and your role can read Conditional Access (Global Reader, Security Reader, Security Administrator or \
-             Conditional Access Administrator)."
-                .into(),
-        ),
+        None => lines.push(t("signins.policies_hidden")),
     }
     let risk = s(v, "riskLevelDuringSignIn");
     if !risk.is_empty() && risk != "hidden" && risk != "none" {
-        lines.push(format!("Risk during sign-in: {risk} ({})", s(v, "riskState")));
+        lines.push(tf("signins.risk", &[("risk", &risk), ("state", &s(v, "riskState"))]));
     }
-    lines.push(format!("Correlation ID: {}", s(v, "correlationId")));
-    lines.push(format!("Request ID: {}", s(v, "id")));
+    lines.push(line("signins.correlation_id", &s(v, "correlationId")));
+    lines.push(line("signins.request_id", &s(v, "id")));
     lines.join("\n")
 }
 
@@ -412,7 +373,7 @@ fn recent_sign_ins(g: &Graph, user_id: &str, top: u32) -> Result<Vec<Value>> {
 
 fn sign_ins_table(items: Vec<Value>) -> TabBody {
     crate::sheets::table(
-        vec!["Date (UTC)", "Application", "Result", "IP address", "Location", "Conditional Access"],
+        vec!["col.date_utc", "col.application", "col.result", "col.ip_address", "col.location", "col.conditional_access"],
         items,
         |v| {
             vec![
@@ -421,7 +382,7 @@ fn sign_ins_table(items: Vec<Value>) -> TabBody {
                 sign_in_result(v),
                 s(v, "ipAddress"),
                 location(v),
-                conditional_access(&s(v, "conditionalAccessStatus")).to_string(),
+                conditional_access(&s(v, "conditionalAccessStatus")),
             ]
         },
     )
@@ -469,82 +430,58 @@ fn sessions_revoked(f: &Facts) -> bool {
 pub fn diagnose(f: &Facts) -> Vec<String> {
     let mut out = Vec::new();
     if f.enabled == Some(false) {
-        out.push(if f.synced {
-            "The account is disabled, so the user can't sign in. It is synced from Active Directory: enable it there.".to_string()
-        } else {
-            "The account is disabled, so the user can't sign in.".to_string()
-        });
+        out.push(t(if f.synced { "diagnose.disabled_synced" } else { "diagnose.disabled" }));
     }
     if f.synced {
-        out.push(
-            "The account is synced from on-premises Active Directory, so its password and whether it is \
-             enabled are set there (unless password writeback is set up)."
-                .into(),
-        );
+        out.push(t("diagnose.synced"));
     }
     if f.guest {
-        out.push(
-            "This is a guest: they sign in with their home organisation's account, whose password and MFA \
-             methods are managed there. Revoking sessions here doesn't sign them out of their home tenant."
-                .into(),
-        );
+        out.push(t("diagnose.guest"));
     }
     if let Some(methods) = &f.methods {
         let tap = methods.iter().find(|m| method_type(m) == "temporaryAccessPassAuthenticationMethod");
         if !methods.iter().any(is_mfa_method) && !f.guest {
-            out.push(
-                "No MFA method is registered. Where MFA is required, the user is asked to register at their next \
-                 sign-in, or blocked if your policies don't allow registering from where they are. A Temporary \
-                 Access Pass lets them sign in to register."
-                    .into(),
-            );
+            out.push(t("diagnose.no_mfa"));
         }
-        if let Some(t) = tap {
-            let usable = if t["isUsable"] == true { "usable now" } else { "not usable yet or any more" };
-            out.push(format!("The user has a Temporary Access Pass ({usable}), created {}.", datetime(&t["createdDateTime"])));
+        if let Some(pass) = tap {
+            let key = if pass["isUsable"] == true { "diagnose.tap_usable" } else { "diagnose.tap_unusable" };
+            out.push(tf(key, &[("created", &datetime(&pass["createdDateTime"]))]));
         }
     }
     if let Some(sign_ins) = &f.sign_ins {
         let code = |v: &Value| v["status"]["errorCode"].as_i64().unwrap_or(0);
         match sign_ins.first() {
-            None => out.push(
-                "There are no interactive sign-ins in the sign-in log for this user (it keeps 30 days).".into(),
-            ),
+            None => out.push(t("diagnose.no_sign_ins")),
             Some(latest) if code(latest) == 0 => {
-                out.push(format!("The latest sign-in, at {}, succeeded.", datetime(&latest["createdDateTime"])));
+                out.push(tf("diagnose.latest_succeeded", &[("time", &datetime(&latest["createdDateTime"]))]));
             }
             Some(_) => {}
         }
         if let Some(failed) = sign_ins.iter().find(|v| code(v) != 0 && !INTERRUPTS.contains(&code(v))) {
             let c = code(failed);
-            let mut text = format!(
-                "The last failed sign-in was at {} to {}: error {c}, {}.",
-                datetime(&failed["createdDateTime"]),
-                s(failed, "appDisplayName"),
-                s(&failed["status"], "failureReason").trim_end_matches('.')
-            );
+            let args: [(&str, &dyn std::fmt::Display); 4] = [
+                ("time", &datetime(&failed["createdDateTime"])),
+                ("application", &s(failed, "appDisplayName")),
+                ("code", &c),
+                ("reason", &s(&failed["status"], "failureReason").trim_end_matches('.').to_string()),
+            ];
+            let mut text = tf("diagnose.last_failed", &args);
             if let Some(a) = advice(c) {
                 text.push(' ');
-                text.push_str(a);
+                text.push_str(&a);
             }
             out.push(text);
         }
         let bad_passwords = sign_ins.iter().filter(|v| code(v) == 50126).count();
         if bad_passwords >= 5 {
-            out.push(format!(
-                "{bad_passwords} of the recent sign-ins failed with a wrong password: the user may have forgotten \
-                 it, or someone may be guessing it."
-            ));
+            out.push(tf("diagnose.bad_passwords", &[("count", &bad_passwords)]));
         }
     }
     if sessions_revoked(f) {
-        out.push(format!(
-            "Sessions from before {} UTC are no longer valid (sessions were revoked then).",
-            datetime(&Value::String(f.sessions_valid_from.clone()))
-        ));
+        out.push(tf("diagnose.revoked", &[("time", &datetime(&Value::String(f.sessions_valid_from.clone())))]));
     }
     if out.is_empty() {
-        out.push("No problems found.".into());
+        out.push(t("diagnose.no_problems"));
     }
     out
 }
@@ -603,50 +540,51 @@ fn load_overview(g: &Graph, user_id: &str, missing: &mut Vec<String>) -> Result<
     let user = user?;
 
     let mut fields: Vec<(String, String)> = Vec::new();
-    let mut field = |label: &str, value: String| fields.push((label.to_string(), value));
-    field("Account", match user["accountEnabled"].as_bool() {
-        Some(true) => "Enabled".into(),
-        Some(false) => "Disabled: the user can't sign in".into(),
+    // An empty label continues the field above.
+    let mut field = |label: &str, value: String| fields.push((if label.is_empty() { String::new() } else { t(label) }, value));
+    field("overview.account", match user["accountEnabled"].as_bool() {
+        Some(true) => t("overview.enabled"),
+        Some(false) => t("overview.disabled"),
         None => String::new(),
     });
-    field("User type", s(&user, "userType"));
-    field("Synced from on-premises", yes_no(&user["onPremisesSyncEnabled"]));
+    field("prop.user_type", s(&user, "userType"));
+    field("prop.synced", yes_no(&user["onPremisesSyncEnabled"]));
     match &activity {
         Ok(a) => {
             let a = &a["signInActivity"];
-            field("Last interactive sign-in", datetime(&a["lastSignInDateTime"]));
-            field("Last non-interactive sign-in", datetime(&a["lastNonInteractiveSignInDateTime"]));
-            field("Last successful sign-in", datetime(&a["lastSuccessfulSignInDateTime"]));
+            field("overview.last_interactive", datetime(&a["lastSignInDateTime"]));
+            field("overview.last_non_interactive", datetime(&a["lastNonInteractiveSignInDateTime"]));
+            field("overview.last_successful", datetime(&a["lastSuccessfulSignInDateTime"]));
         }
-        Err(e) => field("Last sign-in", unavailable(e)),
+        Err(e) => field("prop.last_sign_in", unavailable(e)),
     }
-    field("Password last changed", datetime(&user["lastPasswordChangeDateTime"]));
+    field("prop.password_changed", datetime(&user["lastPasswordChangeDateTime"]));
     if s(&user, "passwordPolicies").contains("DisablePasswordExpiration") {
-        field("Password expiry", "Never expires".into());
+        field("overview.password_expiry", t("overview.never_expires"));
     }
-    field("Sessions valid from", datetime(&user["signInSessionsValidFromDateTime"]));
+    field("overview.sessions_valid_from", datetime(&user["signInSessionsValidFromDateTime"]));
     match &registration {
         Ok(r) => {
-            field("Registered for MFA", yes_no(&r["isMfaRegistered"]));
-            field("Can use MFA", yes_no(&r["isMfaCapable"]));
-            field("Default MFA method", s(r, "defaultMfaMethod"));
-            field("Passwordless capable", yes_no(&r["isPasswordlessCapable"]));
-            field("Registered for password reset", yes_no(&r["isSsprRegistered"]));
-            field("Registration details updated", datetime(&r["lastUpdatedDateTime"]));
+            field("overview.mfa_registered", yes_no(&r["isMfaRegistered"]));
+            field("overview.mfa_capable", yes_no(&r["isMfaCapable"]));
+            field("overview.default_mfa", s(r, "defaultMfaMethod"));
+            field("overview.passwordless", yes_no(&r["isPasswordlessCapable"]));
+            field("overview.sspr_registered", yes_no(&r["isSsprRegistered"]));
+            field("overview.registration_updated", datetime(&r["lastUpdatedDateTime"]));
         }
-        Err(e) => field("Registered for MFA", unavailable(e)),
+        Err(e) => field("overview.mfa_registered", unavailable(e)),
     }
     match &methods {
         Ok(m) => {
             let mut names: Vec<String> = m.iter().map(|v| describe_method(v).0).collect();
             names.sort();
             names.dedup();
-            field("Authentication methods", names.join(", "));
+            field("tab.auth_methods", names.join(", "));
         }
-        Err(e) => field("Authentication methods", unavailable(e)),
+        Err(e) => field("tab.auth_methods", unavailable(e)),
     }
     if let Err(e) = &sign_ins {
-        field("Recent sign-ins", unavailable(e));
+        field("overview.recent_sign_ins", unavailable(e));
     }
     let facts = Facts {
         enabled: user["accountEnabled"].as_bool(),
@@ -659,7 +597,7 @@ fn load_overview(g: &Graph, user_id: &str, missing: &mut Vec<String>) -> Result<
         password_changed: s(&user, "lastPasswordChangeDateTime"),
     };
     for (i, finding) in diagnose(&facts).into_iter().enumerate() {
-        field(if i == 0 { "Troubleshooting" } else { "" }, finding);
+        field(if i == 0 { "overview.troubleshooting" } else { "" }, finding);
     }
     missing.sort();
     missing.dedup();
@@ -680,20 +618,20 @@ pub fn load_tab(g: &Graph, kind: TabKind, user: &Value) -> Result<(TabBody, Vec<
     Ok((body, missing))
 }
 
-/// Buttons a security tab has beyond add, remove and edit, in order.
+/// The keys of the labels of the buttons a security tab has beyond add, remove and edit, in order.
 pub fn extra_ops(kind: TabKind) -> &'static [&'static str] {
     match kind {
-        TabKind::Security => &["Revoke sessions…", "Temporary Access Pass…", "Require MFA re-registration…"],
-        TabKind::AuthMethods => &["Require MFA re-registration…"],
+        TabKind::Security => &["act.revoke_sessions", "act.temporary_access_pass", "security.reregister"],
+        TabKind::AuthMethods => &["security.reregister"],
         _ => &[],
     }
 }
 
-/// Add, remove and edit labels of the security tabs.
+/// The keys of the add, remove and edit labels of the security tabs.
 pub fn op_labels(kind: TabKind) -> [Option<&'static str>; 3] {
     match kind {
-        TabKind::AuthMethods => [Some("Temporary Access Pass…"), Some("Delete method"), None],
-        TabKind::SignIns => [None, None, Some("Details…")],
+        TabKind::AuthMethods => [Some("act.temporary_access_pass"), Some("security.delete_method"), None],
+        TabKind::SignIns => [None, None, Some("security.details")],
         _ => [None, None, None],
     }
 }
@@ -715,13 +653,13 @@ impl App {
             }
             (TabKind::SignIns, TabOp::Edit) => {
                 if let Some(row) = row {
-                    self.push(Dialog::Message { title: "Sign-in details".into(), text: sign_in_details(&row), copy: None });
+                    self.push(Dialog::Message { title: t("signins.details_title"), text: sign_in_details(&row), copy: None });
                 }
             }
             (_, TabOp::Extra(i)) => match extra(i) {
-                Some("Revoke sessions…") => self.revoke_sessions(user, reload),
-                Some("Temporary Access Pass…") => self.temporary_access_pass(user, reload),
-                Some("Require MFA re-registration…") => self.require_reregistration(user, reload),
+                Some("act.revoke_sessions") => self.revoke_sessions(user, reload),
+                Some("act.temporary_access_pass") => self.temporary_access_pass(user, reload),
+                Some("security.reregister") => self.require_reregistration(user, reload),
                 _ => {}
             },
             _ => {}
@@ -731,32 +669,23 @@ impl App {
     pub fn revoke_sessions(&mut self, user: Value, after: impl FnOnce(&mut App) + Send + 'static) {
         let id = s(&user, "id");
         let name = s(&user, "displayName");
-        let guest = if s(&user, "userType") == "Guest" {
-            "\n\nThis is a guest, who signs in through their home organisation, so this doesn't revoke their sessions there."
-        } else {
-            ""
-        };
-        let text = format!(
-            "Revoke all sign-in sessions for {name}?\n\n\
-             This invalidates the refresh tokens and browser session cookies issued to them, so their apps and \
-             browsers have to sign in again the next time they need a new token. It can take a few minutes to \
-             take effect.\n\n\
-             It does not end access straight away: access tokens already issued stay valid until they expire, \
-             usually within an hour (apps that support Continuous Access Evaluation may stop sooner). It also \
-             doesn't stop them signing in again: disable the account or reset the password for that.{guest}"
-        );
-        self.push(Dialog::confirm("Revoke sessions", &text, move |app| {
+        let mut text = tf("revoke.question", &[("name", &name)]);
+        if s(&user, "userType") == "Guest" {
+            text.push_str("\n\n");
+            text.push_str(&t("revoke.guest"));
+        }
+        self.push(Dialog::confirm(&t("revoke.title"), &text, move |app| {
             let path = format!("/users/{id}/revokeSignInSessions");
             app.spawn(
-                "Revoking sessions…",
+                t("revoke.working"),
                 move |g| g.post(&path, &json!({})).map_err(|e| explain(e, Need::Users)),
                 move |app, r| match r {
                     Ok(_) => {
-                        app.status = format!("Sessions revoked for {name}");
-                        log::info!("{}", app.status);
+                        log::info!("Sessions revoked for {name}");
+                        app.status = tf("revoke.done", &[("name", &name)]);
                         after(app);
                     }
-                    Err(e) => app.fail("Revoke sessions", e),
+                    Err(e) => app.fail(&t("revoke.title"), e),
                 },
             );
         }));
@@ -766,33 +695,28 @@ impl App {
         let id = s(&user, "id");
         let name = s(&user, "displayName");
         let after = std::cell::RefCell::new(Some(after));
-        let form = Form::new(&format!("Temporary Access Pass — {name}"), "Create")
-            .intro(
-                "A Temporary Access Pass is a time-limited passcode the user can sign in with, for example to set \
-                 up Microsoft Authenticator or a passkey, or after losing their phone. Creating one replaces any pass \
-                 they already have. It must be enabled in the tenant's authentication methods policy, which also \
-                 limits its lifetime and whether it can be used more than once. The pass is shown only once.",
-            )
-            .field(Field::text("lifetime", "Lifetime in minutes", "60").required())
-            .field(Field::check("once", "Can be used only once", true))
-            .field(Field::text("start", "Start (UTC, optional)", ""))
-            .field(Field::info("", "Leave Start blank for now, or enter a time such as 2026-12-24 09:00."))
+        let form = Form::new(&tf("tap.title", &[("name", &name)]), &t("dialog.create"))
+            .intro(&t("tap.intro"))
+            .field(Field::text("lifetime", &t("tap.lifetime"), "60").required())
+            .field(Field::check("once", &t("tap.once"), true))
+            .field(Field::text("start", &t("tap.start"), ""))
+            .field(Field::info("", &t("tap.start_note")))
             .on_submit(move |app, f| {
-                let lifetime: i64 = f.text("lifetime").parse().map_err(|_| "Enter the lifetime as a number of minutes.".to_string())?;
+                let lifetime: i64 = f.text("lifetime").parse().map_err(|_| t("tap.bad_lifetime"))?;
                 if !(10..=43_200).contains(&lifetime) {
-                    return Err("The lifetime must be between 10 minutes and 43,200 minutes (30 days).".into());
+                    return Err(t("tap.lifetime_range"));
                 }
                 let mut body = json!({ "lifetimeInMinutes": lifetime, "isUsableOnce": f.checked("once") });
                 let start = f.text("start");
                 if !start.is_empty() {
-                    let at = crate::exchange::parse_time(&start).ok_or("Enter the start as a date and time, such as 2026-12-24 09:00.")?;
+                    let at = crate::exchange::parse_time(&start).ok_or_else(|| t("tap.bad_start"))?;
                     body["startDateTime"] = json!(at);
                 }
                 let path = format!("/users/{id}/authentication/temporaryAccessPassMethods");
                 let name = name.clone();
                 let after = after.borrow_mut().take();
                 app.spawn(
-                    "Creating Temporary Access Pass…",
+                    t("tap.creating"),
                     move |g| {
                         require(g, AUTH_METHODS_SCOPE)?;
                         g.post(&path, &body).map_err(|e| explain(e, Need::Methods))
@@ -800,31 +724,33 @@ impl App {
                     move |app, r| match r {
                         Ok(tap) => {
                             log::info!("Created a Temporary Access Pass for {name}");
-                            app.status = format!("Temporary Access Pass created for {name}");
-                            let when = match s(&tap, "startDateTime") {
-                                st if st.is_empty() => "from now".to_string(),
-                                st => format!("from {} UTC", datetime(&Value::String(st))),
+                            app.status = tf("tap.done", &[("name", &name)]);
+                            let minutes = tap["lifetimeInMinutes"].as_i64().unwrap_or(0);
+                            let once = tap["isUsableOnce"] == true;
+                            let mut text = match s(&tap, "startDateTime") {
+                                st if st.is_empty() => {
+                                    tf(if once { "tap.valid_now_once" } else { "tap.valid_now" }, &[("name", &name), ("minutes", &minutes)])
+                                }
+                                st => {
+                                    let args: [(&str, &dyn std::fmt::Display); 3] =
+                                        [("name", &name), ("minutes", &minutes), ("start", &datetime(&Value::String(st)))];
+                                    tf(if once { "tap.valid_from_once" } else { "tap.valid_from" }, &args)
+                                }
                             };
-                            let once = if tap["isUsableOnce"] == true { ", for one sign-in" } else { "" };
-                            let usable = match s(&tap, "methodUsabilityReason").as_str() {
-                                "" | "EnabledByPolicy" => String::new(),
-                                reason if tap["isUsable"] != true => format!("\n\nIt can't be used yet: {reason}."),
-                                _ => String::new(),
-                            };
-                            app.push(Dialog::Message {
-                                title: "Temporary Access Pass".into(),
-                                text: format!(
-                                    "This pass for {name} is valid for {} minutes {when}{once}. It won't be shown again: \
-                                     give it to the user in a secure way.{usable}",
-                                    tap["lifetimeInMinutes"].as_i64().unwrap_or(0)
-                                ),
-                                copy: Some(s(&tap, "temporaryAccessPass")),
-                            });
+                            match s(&tap, "methodUsabilityReason").as_str() {
+                                "" | "EnabledByPolicy" => {}
+                                reason if tap["isUsable"] != true => {
+                                    text.push_str("\n\n");
+                                    text.push_str(&tf("tap.not_usable", &[("reason", &reason)]));
+                                }
+                                _ => {}
+                            }
+                            app.push(Dialog::Message { title: t("method.tap"), text, copy: Some(s(&tap, "temporaryAccessPass")) });
                             if let Some(after) = after {
                                 after(app);
                             }
                         }
-                        Err(e) => app.fail("Temporary Access Pass", e),
+                        Err(e) => app.fail(&t("method.tap"), e),
                     },
                 );
                 Ok(())
@@ -838,29 +764,29 @@ impl App {
         let (kind, details) = describe_method(&method);
         let Some(path) = delete_path(&id, &method) else {
             let text = if method_type(&method) == "passwordAuthenticationMethod" {
-                "The password can't be deleted. Use Reset password to change it.".to_string()
+                t("method.password_not_deletable")
             } else {
-                format!("{kind} can't be deleted with Microsoft Graph. Remove it in the Microsoft Entra admin centre.")
+                tf("method.not_deletable", &[("method", &kind)])
             };
-            self.push(Dialog::message("Delete method", &text));
+            self.push(Dialog::message(&t("security.delete_method"), &text));
             return;
         };
         let what = if details.is_empty() { kind.clone() } else { format!("{kind} ({details})") };
-        let text = format!("Delete {what} from {name}?\n\n{}", delete_effect(&method));
-        self.push(Dialog::confirm("Delete authentication method", &text, move |app| {
+        let text = format!("{}\n\n{}", tf("method.delete_question", &[("method", &what), ("name", &name)]), delete_effect(&method));
+        self.push(Dialog::confirm(&t("method.delete_title"), &text, move |app| {
             app.spawn(
-                "Deleting authentication method…",
+                t("method.deleting"),
                 move |g| {
                     require(g, AUTH_METHODS_SCOPE)?;
                     g.delete(&path).map_err(|e| explain(e, Need::Methods))
                 },
                 move |app, r| match r {
                     Ok(()) => {
-                        app.status = format!("Deleted {kind} from {name}");
-                        log::info!("{}", app.status);
+                        log::info!("Deleted an authentication method from {name}");
+                        app.status = tf("method.deleted", &[("method", &kind), ("name", &name)]);
                         after(app);
                     }
-                    Err(e) => app.fail("Delete authentication method", e),
+                    Err(e) => app.fail(&t("method.delete_title"), e),
                 },
             );
         }));
@@ -872,19 +798,16 @@ impl App {
         let id = s(&user, "id");
         let name = s(&user, "displayName");
         let get = id.clone();
-        self.spawn("Loading authentication methods…", move |g| load_methods(g, &get), move |app, r| match r {
+        self.spawn(tf("status.loading_tab", &[("tab", &t("tab.auth_methods"))]), move |g| load_methods(g, &get), move |app, r| match r {
             Ok(methods) => app.reregistration_form(id, name, methods, after),
-            Err(e) => app.fail("Require MFA re-registration", e),
+            Err(e) => app.fail(&t("reregister.title"), e),
         });
     }
 
     fn reregistration_form(&mut self, id: String, name: String, methods: Vec<Value>, after: impl FnOnce(&mut App) + Send + 'static) {
         let mut targets: Vec<Value> = methods.into_iter().filter(is_mfa_method).collect();
         if targets.is_empty() {
-            self.push(Dialog::message(
-                "Require MFA re-registration",
-                &format!("{name} has no MFA methods registered, so they will already be asked to register where MFA is required."),
-            ));
+            self.push(Dialog::message(&t("reregister.title"), &tf("reregister.none", &[("name", &name)])));
             return;
         }
         targets.sort_by_key(deletion_order);
@@ -895,23 +818,11 @@ impl App {
                 if details.is_empty() { format!("  • {kind}") } else { format!("  • {kind}: {details}") }
             })
             .collect();
-        let intro = format!(
-            "Microsoft Graph has no single switch for this. As Microsoft documents, it is done by deleting the \
-             user's MFA methods; for {name} these {} will be deleted:\n\n{}\n\n\
-             The next time they sign in where MFA is required, they have to register a method again (a Temporary \
-             Access Pass can help). Until then, sign-ins that need MFA prompt for registration, or are blocked if \
-             your policies don't allow registering from where they are.\n\n\
-             Kept: the password, Windows Hello for Business and platform credentials on their devices, the email \
-             address used for password reset, and any Temporary Access Pass. Delete those on the Authentication \
-             methods tab too if a device may be compromised. A phone number that is their default MFA method may \
-             refuse to be deleted; each result is shown afterwards.",
-            targets.len(),
-            list.join("\n")
-        );
+        let intro = tf("reregister.intro", &[("name", &name), ("count", &targets.len()), ("methods", &list.join("\n"))]);
         let after = std::cell::RefCell::new(Some(after));
-        let form = Form::new(&format!("Require MFA re-registration — {name}"), "Delete methods")
+        let form = Form::new(&tf("reregister.form_title", &[("name", &name)]), &t("reregister.delete"))
             .intro(&intro)
-            .field(Field::check("revoke", "Also revoke sign-in sessions, so apps have to sign in again", false))
+            .field(Field::check("revoke", &t("reregister.revoke"), false))
             .on_submit(move |app, f| {
                 let revoke = f.checked("revoke");
                 let jobs: Vec<(String, Option<String>)> =
@@ -920,7 +831,7 @@ impl App {
                 let name = name.clone();
                 let after = after.borrow_mut().take();
                 app.spawn(
-                    "Deleting MFA methods…",
+                    t("reregister.working"),
                     move |g| {
                         require(g, AUTH_METHODS_SCOPE)?;
                         let mut results: Vec<(String, Result<(), String>)> = jobs
@@ -928,14 +839,14 @@ impl App {
                             .map(|(label, path)| {
                                 let r = match path {
                                     Some(p) => g.delete(&p).map_err(|e| format!("{:#}", explain(e, Need::Methods))),
-                                    None => Err("can't be deleted with Microsoft Graph".into()),
+                                    None => Err(t("reregister.not_deletable")),
                                 };
-                                (format!("Delete {label}"), r)
+                                (tf("task.delete", &[("name", &label)]), r)
                             })
                             .collect();
                         if revoke {
                             let r = g.post(&revoke_path, &json!({})).map(|_| ()).map_err(|e| format!("{:#}", explain(e, Need::Users)));
-                            results.push(("Revoke sign-in sessions".into(), r));
+                            results.push((t("reregister.revoke_step"), r));
                         }
                         Ok(results)
                     },
@@ -949,26 +860,20 @@ impl App {
                                     Err(e) => format!("✖ {label}: {e}"),
                                 })
                                 .collect();
+                            log::info!("MFA re-registration for {name}: {failed} of {} steps failed", results.len());
                             let (title, head) = if failed == 0 {
-                                ("MFA re-registration required", format!("All {} steps succeeded for {name}.", results.len()))
+                                (t("reregister.done_title"), tf("reregister.done", &[("count", &results.len()), ("name", &name)]))
                             } else {
-                                (
-                                    "MFA re-registration incomplete",
-                                    format!(
-                                        "{failed} of {} steps failed for {name}, so they may still be able to use a method \
-                                         that wasn't deleted.",
-                                        results.len()
-                                    ),
-                                )
+                                let args: [(&str, &dyn std::fmt::Display); 3] = [("failed", &failed), ("count", &results.len()), ("name", &name)];
+                                (t("reregister.incomplete_title"), tf("reregister.incomplete", &args))
                             };
-                            log::info!("{title}: {head}");
-                            app.status = title.into();
-                            app.push(Dialog::message(title, &format!("{head}\n\n{}", lines.join("\n"))));
+                            app.status = title.clone();
+                            app.push(Dialog::message(&title, &format!("{head}\n\n{}", lines.join("\n"))));
                             if let Some(after) = after {
                                 after(app);
                             }
                         }
-                        Err(e) => app.fail("Require MFA re-registration", e),
+                        Err(e) => app.fail(&t("reregister.title"), e),
                     },
                 );
                 Ok(())

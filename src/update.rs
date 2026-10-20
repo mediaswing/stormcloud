@@ -2,6 +2,7 @@
 
 use crate::app::App;
 use crate::dialogs::Dialog;
+use crate::i18n::{t, tf};
 use anyhow::{bail, Result};
 use serde_json::Value;
 use std::time::Duration;
@@ -32,7 +33,7 @@ fn latest() -> Result<Release> {
     let status = resp.status();
     log::debug!("GET {url} -> {status}");
     if !status.is_success() {
-        bail!("GitHub answered {status}.");
+        bail!(tf("update.github_error", &[("status", &status)]));
     }
     let v: Value = resp.json()?;
     let text = |k: &str| v[k].as_str().unwrap_or("").to_string();
@@ -62,14 +63,14 @@ impl App {
     /// startup only speaks up about a newer version that hasn't been skipped.
     pub fn check_for_updates(&mut self, manual: bool) {
         if manual {
-            self.status = "Checking for updates…".into();
+            self.status = t("update.checking");
         }
         self.spawn_plain(latest, move |app, r| {
             let current = env!("CARGO_PKG_VERSION");
             match r {
                 Ok(release) if is_newer(&release.version, current) => {
                     if manual {
-                        app.status = "Ready".into();
+                        app.status = t("status.ready");
                     }
                     log::info!("Version {} is available (running {current})", release.version);
                     if manual || release.version != app.settings.skipped_version {
@@ -79,14 +80,14 @@ impl App {
                 Ok(release) => {
                     log::debug!("Up to date: latest release is {}, running {current}", release.version);
                     if manual {
-                        app.status = "Ready".into();
-                        app.push(Dialog::message("Check for updates", &format!("You have the latest version, {current}.")));
+                        app.status = t("status.ready");
+                        app.push(Dialog::message(&t("update.check_title"), &tf("update.latest", &[("version", &current)])));
                     }
                 }
                 Err(e) => {
                     log::warn!("Could not check for updates: {e}");
                     if manual {
-                        app.error("Check for updates", e);
+                        app.error(&t("update.check_title"), e);
                     }
                 }
             }

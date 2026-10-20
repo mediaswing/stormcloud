@@ -6,6 +6,7 @@
 use crate::app::{App, Bold};
 use crate::dialogs::Dialog;
 use crate::graph::{enc, odata_str};
+use crate::i18n::{self, t, tf};
 use crate::model::{Node, s};
 use crate::ops::{generate_password, is_guid};
 use anyhow::Context;
@@ -35,12 +36,6 @@ const USER_COLUMNS: &[(&str, &[&str])] = &[
 const MEMBER_COLUMNS: &[&str] =
     &["userprincipalname", "upn", "username", "mail", "email", "emailaddress", "id", "objectid"];
 
-pub const USER_FORMAT: &str = "Columns: Display name and User principal name (required); Password, First name, \
-    Last name, Job title, Department, Usage location, Mail nickname, Enabled and Force change password \
-    (optional). A blank password is generated; Enabled and Force change password default to Yes.";
-
-pub const MEMBER_FORMAT: &str = "One column headed User principal name, Email or Object ID, \
-    or a single column of user principal names with no header.";
 
 // ----- reading and writing CSV ------------------------------------------------
 
@@ -74,7 +69,7 @@ pub fn parse_table(bytes: &[u8]) -> Result<Table, String> {
         .from_reader(text.as_bytes());
     let mut records = Vec::new();
     for record in reader.records() {
-        let record = record.map_err(|e| format!("The file is not valid CSV: {e}"))?;
+        let record = record.map_err(|e| tf("csv.invalid", &[("error", &e)]))?;
         // From the byte offset, as the reader's own line count is off with Windows line endings
         // and blank lines: its offset can point at the line breaks before the record.
         let bytes = text.as_bytes();
@@ -89,7 +84,7 @@ pub fn parse_table(bytes: &[u8]) -> Result<Table, String> {
         }
     }
     if records.is_empty() {
-        return Err("The file is empty.".into());
+        return Err(t("csv.empty"));
     }
     let (header_line, headers) = records.remove(0);
     Ok(Table { headers, header_line, rows: records })
@@ -140,7 +135,7 @@ pub fn csv_bytes(headers: &[&str], rows: &[Vec<String>]) -> anyhow::Result<Vec<u
     for row in rows {
         writer.write_record(row.iter().map(|c| escape_cell(c)))?;
     }
-    writer.into_inner().map_err(|e| anyhow::anyhow!("could not write the CSV: {}", e.error()))
+    writer.into_inner().map_err(|e| anyhow::anyhow!(tf("csv.write_failed", &[("error", e.error())])))
 }
 
 /// Lower case with everything but letters and digits removed, so "First name", "firstName" and
@@ -189,7 +184,7 @@ pub fn parse_users(table: &Table, domains: &[String], existing: &HashSet<String>
     }
     for (prop, label) in [("displayName", "Display name"), ("userPrincipalName", "User principal name")] {
         if !index.contains_key(prop) {
-            return Err(format!("The file has no {label} column.\n\n{USER_FORMAT}"));
+            return Err(tf("csv.no_column", &[("column", &label), ("format", &t("csv.user_format"))]));
         }
     }
     let verified: HashSet<String> = domains.iter().map(|d| d.to_lowercase()).collect();
@@ -226,27 +221,27 @@ pub fn parse_users(table: &Table, domains: &[String], existing: &HashSet<String>
             let enabled = parse_yes_no(&get("accountEnabled"), true);
             let force = parse_yes_no(&get("forceChange"), true);
             let error = if display_name.is_empty() {
-                Some("Display name is missing".to_string())
+                Some(t("csv.no_display_name"))
             } else if upn.is_empty() {
-                Some("User principal name is missing".into())
+                Some(t("csv.no_upn"))
             } else if alias.is_empty() || domain.is_empty() || domain.contains('@') || upn.contains(char::is_whitespace) {
-                Some(format!("'{upn}' is not a valid user principal name"))
+                Some(tf("csv.bad_upn", &[("upn", &upn)]))
             } else if !verified.is_empty() && !verified.contains(&domain.to_lowercase()) {
-                Some(format!("{domain} is not a verified domain of this tenant"))
+                Some(tf("csv.unverified_domain", &[("domain", &domain)]))
             } else if existing.contains(&upn.to_lowercase()) {
-                Some("A user with this name already exists".into())
+                Some(t("csv.user_exists"))
             } else if let Some(first) = seen.get(&upn.to_lowercase()) {
-                Some(format!("Same user principal name as line {first}"))
+                Some(tf("csv.same_upn", &[("line", first)]))
             } else if password.chars().count() < 8 {
-                Some("Password must be at least 8 characters".into())
+                Some(t("csv.short_password"))
             } else if !usage.is_empty() && (usage.len() != 2 || !usage.chars().all(|c| c.is_ascii_alphabetic())) {
-                Some(format!("Usage location '{usage}' is not a two-letter country code"))
+                Some(tf("csv.bad_usage_location", &[("usage", &usage)]))
             } else if nickname.is_empty() {
-                Some("Mail nickname is missing".into())
+                Some(t("csv.no_nickname"))
             } else if enabled.is_err() {
-                Some("Enabled must be Yes or No".into())
+                Some(t("csv.bad_enabled"))
             } else if force.is_err() {
-                Some("Force change password must be Yes or No".into())
+                Some(t("csv.bad_force_change"))
             } else {
                 None
             };
@@ -299,7 +294,7 @@ pub fn parse_members(table: &Table) -> Result<Vec<MemberRow>, String> {
             values.push((table.header_line, table.headers[0].clone()));
             values.extend(table.rows.iter().map(|(line, cells)| (*line, cells.first().cloned().unwrap_or_default())));
         }
-        None => return Err(format!("The file has no column of users.\n\n{MEMBER_FORMAT}")),
+        None => return Err(tf("csv.no_user_column", &[("format", &t("csv.member_format"))])),
     }
     let mut seen: HashMap<String, u64> = HashMap::new();
     Ok(values
@@ -308,10 +303,8 @@ pub fn parse_members(table: &Table) -> Result<Vec<MemberRow>, String> {
         .map(|(line, value)| {
             let key = value.to_lowercase();
             let error = match seen.get(&key) {
-                Some(first) => Some(format!("Same user as line {first}")),
-                None if !value.contains('@') && !is_guid(&value) => {
-                    Some("Not a user principal name, email address or object ID".into())
-                }
+                Some(first) => Some(tf("csv.same_user", &[("line", first)])),
+                None if !value.contains('@') && !is_guid(&value) => Some(t("csv.not_a_user")),
                 None => None,
             };
             seen.entry(key).or_insert(line);
@@ -349,13 +342,14 @@ type Run = Box<dyn FnOnce(&mut App, u64)>;
 pub struct Bulk {
     title: String,
     intro: String,
+    /// The keys of the column titles in the catalogue.
     headers: Vec<&'static str>,
     rows: Vec<BulkRow>,
     stage: Stage,
     /// The button that starts the import, such as "Create 12 users".
     start: String,
     run: Option<Run>,
-    /// What "Save results…" writes once the import is done.
+    /// What "Save results…" writes once the import is done, under these column titles' keys.
     results_headers: Vec<&'static str>,
     results: Vec<Vec<String>>,
     results_name: String,
@@ -374,26 +368,32 @@ type Outcomes = Vec<(usize, Result<String, String>)>;
 impl App {
     // ----- export ---------------------------------------------------------
 
-    /// Saves the result list, as filtered and sorted on screen, to a CSV file.
+    /// Saves the result list, as filtered and sorted on screen, to a CSV file. It is in English
+    /// whatever the language of the interface, as a database export is, so a list of users can be
+    /// imported again.
     pub fn export_list(&mut self) {
         let node = self.node;
         let cols = node.columns();
         let id_key = if node == Node::Licences { "skuId" } else { "id" };
-        let mut headers: Vec<&str> = cols.iter().map(|c| c.title).collect();
-        headers.push(if node == Node::Licences { "SKU ID" } else { "Object ID" });
-        let rows: Vec<Vec<String>> = self
-            .view_rows()
-            .into_iter()
-            .map(|v| {
-                let mut row: Vec<String> = cols.iter().map(|c| (c.get)(v)).collect();
-                row.push(s(v, id_key));
-                row
-            })
-            .collect();
-        let name = format!("{}.csv", node.title().to_lowercase());
-        if let Some(path) = self.save_csv("Export list", &name, &headers, &rows) {
-            self.status = format!("Exported {} {} to {}", rows.len(), node.title().to_lowercase(), path.display());
-            log::info!("{}", self.status);
+        let (headers, rows, name) = i18n::in_english(|| {
+            let mut headers: Vec<String> = cols.iter().map(|c| t(c.title)).collect();
+            headers.push(if node == Node::Licences { "SKU ID" } else { "Object ID" }.to_string());
+            let rows: Vec<Vec<String>> = self
+                .view_rows()
+                .into_iter()
+                .map(|v| {
+                    let mut row: Vec<String> = cols.iter().map(|c| (c.get)(v)).collect();
+                    row.push(s(v, id_key));
+                    row
+                })
+                .collect();
+            (headers, rows, format!("{}.csv", node.list_name()))
+        });
+        let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+        if let Some(path) = self.save_csv(&t("csv.export_title"), &name, &headers, &rows) {
+            log::info!("Exported {} {node:?} to {}", rows.len(), path.display());
+            let args: [(&str, &dyn std::fmt::Display); 3] = [("count", &rows.len()), ("list", &node.list_name()), ("path", &path.display())];
+            self.status = tf("csv.exported", &args);
         }
     }
 
@@ -402,14 +402,14 @@ impl App {
     pub(crate) fn save_csv(&mut self, title: &str, file_name: &str, headers: &[&str], rows: &[Vec<String>]) -> Option<PathBuf> {
         let mut path = rfd::FileDialog::new()
             .set_title(title)
-            .add_filter("CSV file", &["csv"])
+            .add_filter(t("csv.file_type"), &["csv"])
             .set_file_name(file_name)
             .save_file()?;
         if path.extension().is_none() {
             path.set_extension("csv");
         }
         let written = csv_bytes(headers, rows)
-            .and_then(|bytes| std::fs::write(&path, bytes).with_context(|| format!("could not write {}", path.display())));
+            .and_then(|bytes| std::fs::write(&path, bytes).with_context(|| tf("csv.save_failed", &[("path", &path.display())])));
         match written {
             Ok(()) => Some(path),
             Err(e) => {
@@ -422,10 +422,10 @@ impl App {
     /// Asks for a CSV file and reads it. None if the user cancelled or it could not be read
     /// (which is reported).
     fn open_csv(&mut self, title: &str) -> Option<Table> {
-        let path = rfd::FileDialog::new().set_title(title).add_filter("CSV file", &["csv", "txt"]).pick_file()?;
+        let path = rfd::FileDialog::new().set_title(title).add_filter(t("csv.file_type"), &["csv", "txt"]).pick_file()?;
         log::info!("{title}: reading {}", path.display());
         let parsed = std::fs::read(&path)
-            .map_err(|e| format!("Could not read {}: {e}", path.display()))
+            .map_err(|e| tf("csv.read_failed", &[("path", &path.display()), ("error", &e)]))
             .and_then(|bytes| parse_table(&bytes));
         match parsed {
             Ok(table) => Some(table),
@@ -439,7 +439,7 @@ impl App {
     // ----- user import ----------------------------------------------------
 
     pub fn import_users(&mut self) {
-        let title = "Import users from CSV";
+        let title = &t("bulk.users_title");
         let Some(table) = self.open_csv(title) else { return };
         let existing: HashSet<String> = self
             .data
@@ -451,24 +451,21 @@ impl App {
             Err(e) => return self.error(title, e),
         };
         if users.is_empty() {
-            return self.error(title, format!("The file has a header line but no users.\n\n{USER_FORMAT}"));
+            return self.error(title, tf("csv.no_users", &[("format", &t("csv.user_format"))]));
         }
-        let mut intro = String::from(
-            "Check the users below. Rows with a problem are skipped. A user name without a domain gets \
-             the tenant's default domain. The initial passwords are in the results, which you can save \
-             once the users are created.",
-        );
+        let mut intro = t("bulk.users_intro");
         if !ignored.is_empty() {
-            intro.push_str(&format!("\n\nIgnored columns: {}.", ignored.join(", ")));
+            intro.push_str("\n\n");
+            intro.push_str(&tf("bulk.ignored", &[("columns", &ignored.join(", "))]));
         }
         let rows = users
             .iter()
             .map(|u| {
-                let password = if u.generated_password { "Generated" } else { "From file" };
-                let cells = vec![u.line.to_string(), u.display_name.clone(), u.upn.clone(), password.into()];
+                let password = t(if u.generated_password { "bulk.generated" } else { "bulk.from_file" });
+                let cells = vec![u.line.to_string(), u.display_name.clone(), u.upn.clone(), password];
                 match &u.error {
                     Some(e) => BulkRow { cells, status: e.clone(), state: RowState::Skipped },
-                    None => BulkRow { cells, status: "Ready".into(), state: RowState::Ready },
+                    None => BulkRow { cells, status: t("bulk.ready"), state: RowState::Ready },
                 }
             })
             .collect();
@@ -480,7 +477,7 @@ impl App {
         let run = move |app: &mut App, dialog: u64| {
             log::info!("Importing {n} users from CSV");
             app.spawn(
-                format!("Creating {n} users…"),
+                tf("bulk.creating_users", &[("count", &n)]),
                 move |g| Ok(jobs.into_iter().map(|(i, body)| (i, g.post("/users", &body).map_err(|e| e.to_string()))).collect()),
                 move |app, r: anyhow::Result<Vec<(usize, Result<Value, String>)>>| {
                     let mut outcomes = Vec::new();
@@ -490,8 +487,8 @@ impl App {
                         match created {
                             Ok(user) => {
                                 app.upsert(Node::Users, user);
-                                results.push(vec![name, upn, password, "Created".into()]);
-                                outcomes.push((i, Ok("Created".into())));
+                                results.push(vec![name, upn, password, t("bulk.created")]);
+                                outcomes.push((i, Ok(t("bulk.created"))));
                             }
                             Err(e) => {
                                 results.push(vec![name, upn, String::new(), e.clone()]);
@@ -499,24 +496,22 @@ impl App {
                             }
                         }
                     }
-                    app.finish_bulk(dialog, outcomes, results, "Created", "users");
+                    app.finish_bulk(dialog, outcomes, results, "bulk.created_users", "bulk.created_users_failed");
                 },
             );
         };
         self.push(Dialog::Bulk(Box::new(Bulk {
             title: title.into(),
             intro,
-            headers: vec!["Line", "Display name", "User principal name", "Password", "Status"],
+            headers: vec!["col.line", "col.display_name", "col.upn", "col.password", "col.status"],
             rows,
             stage: Stage::Preview,
-            start: format!("Create {n} user{}", if n == 1 { "" } else { "s" }),
+            start: if n == 1 { t("bulk.create_user") } else { tf("bulk.create_users", &[("count", &n)]) },
             run: Some(Box::new(run)),
-            results_headers: vec!["Display name", "User principal name", "Initial password", "Result"],
+            results_headers: vec!["col.display_name", "col.upn", "col.initial_password", "col.result"],
             results: Vec::new(),
-            results_name: "new users.csv".into(),
-            results_note: "The results file holds the initial passwords. Keep it somewhere safe and delete \
-                           it once they have been passed on."
-                .into(),
+            results_name: format!("{}.csv", t("bulk.new_users_file")),
+            results_note: t("bulk.passwords_note"),
         })));
     }
 
@@ -524,13 +519,13 @@ impl App {
 
     pub fn import_members(&mut self, group: Value) {
         let name = s(&group, "displayName");
-        let title = format!("Add members to {name} from CSV");
+        let title = tf("bulk.members_title", &[("name", &name)]);
         if !s(&group, "membershipRule").is_empty() {
-            return self.error(&title, "This group has dynamic membership, so its members are set by its rule and can't be added.");
+            return self.error(&title, t("bulk.dynamic_group"));
         }
         let Some(table) = self.open_csv(&title) else { return };
         let members = match parse_members(&table) {
-            Ok(m) if m.is_empty() => return self.error(&title, format!("The file has no users in it.\n\n{MEMBER_FORMAT}")),
+            Ok(m) if m.is_empty() => return self.error(&title, tf("csv.no_members", &[("format", &t("csv.member_format"))])),
             Ok(m) => m,
             Err(e) => return self.error(&title, e),
         };
@@ -540,7 +535,7 @@ impl App {
                 let cells = vec![m.line.to_string(), m.value.clone()];
                 match &m.error {
                     Some(e) => BulkRow { cells, status: e.clone(), state: RowState::Skipped },
-                    None => BulkRow { cells, status: "Ready".into(), state: RowState::Ready },
+                    None => BulkRow { cells, status: t("bulk.ready"), state: RowState::Ready },
                 }
             })
             .collect();
@@ -553,7 +548,7 @@ impl App {
         let run = move |app: &mut App, dialog: u64| {
             log::info!("Adding {n} members to {name} from CSV");
             app.spawn(
-                format!("Adding {n} members…"),
+                tf("bulk.adding_members", &[("count", &n)]),
                 move |g| {
                     let path = format!("/groups/{group_id}/members/$ref");
                     Ok(jobs
@@ -562,8 +557,8 @@ impl App {
                             let added = find_user(g, &value).and_then(|id| {
                                 let body = json!({ "@odata.id": format!("{endpoint}/v1.0/directoryObjects/{id}") });
                                 match g.post(&path, &body) {
-                                    Ok(_) => Ok("Added".to_string()),
-                                    Err(e) if e.to_string().contains("already exist") => Ok("Already a member".into()),
+                                    Ok(_) => Ok(t("bulk.added")),
+                                    Err(e) if e.to_string().contains("already exist") => Ok(t("bulk.already_member")),
                                     Err(e) => Err(e.to_string()),
                                 }
                             });
@@ -577,37 +572,36 @@ impl App {
                         .iter()
                         .map(|(i, o)| vec![values[*i].clone(), o.clone().unwrap_or_else(|e| e)])
                         .collect();
-                    app.finish_bulk(dialog, outcomes, results, "Added", "members");
+                    app.finish_bulk(dialog, outcomes, results, "bulk.added_members", "bulk.added_members_failed");
                 },
             );
         };
         self.push(Dialog::Bulk(Box::new(Bulk {
             title: title.clone(),
-            intro: "Check the users below. Rows with a problem are skipped, and users who are already \
-                    members are left as they are."
-                .into(),
-            headers: vec!["Line", "User", "Status"],
+            intro: t("bulk.members_intro"),
+            headers: vec!["col.line", "col.user", "col.status"],
             rows,
             stage: Stage::Preview,
-            start: format!("Add {n} member{}", if n == 1 { "" } else { "s" }),
+            start: if n == 1 { t("bulk.add_member") } else { tf("bulk.add_members", &[("count", &n)]) },
             run: Some(Box::new(run)),
-            results_headers: vec!["User", "Result"],
+            results_headers: vec!["col.user", "col.result"],
             results: Vec::new(),
-            results_name: "added members.csv".into(),
+            results_name: format!("{}.csv", t("bulk.added_members_file")),
             results_note: String::new(),
         })));
     }
 
-    /// Shows how an import went, row by row, and sums it up in the status bar.
-    fn finish_bulk(&mut self, dialog: u64, outcomes: Outcomes, results: Vec<Vec<String>>, verb: &str, noun: &str) {
+    /// Shows how an import went, row by row, and sums it up in the status bar with the text for
+    /// `done_key`, or for `failed_key` when some failed.
+    fn finish_bulk(&mut self, dialog: u64, outcomes: Outcomes, results: Vec<Vec<String>>, done_key: &str, failed_key: &str) {
         let done = outcomes.iter().filter(|(_, o)| o.is_ok()).count();
         let failed = outcomes.len() - done;
+        log::info!("CSV import: {done} done, {failed} failed");
         self.status = if failed == 0 {
-            format!("{verb} {done} {noun}")
+            tf(done_key, &[("count", &done)])
         } else {
-            format!("{verb} {done} {noun}; {failed} failed")
+            tf(failed_key, &[("count", &done), ("failed", &failed)])
         };
-        log::info!("CSV import: {}", self.status);
         let Some(Dialog::Bulk(bulk)) = self.dialog_mut(dialog) else { return };
         for (i, outcome) in outcomes {
             let row = &mut bulk.rows[i];
@@ -632,14 +626,13 @@ impl App {
             ui.add_space(6.0);
             let count = |state| bulk.rows.iter().filter(|r| r.state == state).count();
             let summary = match bulk.stage {
-                Stage::Preview => format!("{} ready, {} to skip", count(RowState::Ready), count(RowState::Skipped)),
-                Stage::Running => format!("Working on {} rows…", count(RowState::Ready)),
-                Stage::Done => format!(
-                    "{} done, {} failed, {} skipped",
-                    count(RowState::Done),
-                    count(RowState::Failed),
-                    count(RowState::Skipped)
-                ),
+                Stage::Preview => tf("bulk.preview_summary", &[("ready", &count(RowState::Ready)), ("skip", &count(RowState::Skipped))]),
+                Stage::Running => tf("bulk.running_summary", &[("count", &count(RowState::Ready))]),
+                Stage::Done => {
+                    let args: [(&str, &dyn std::fmt::Display); 3] =
+                        [("done", &count(RowState::Done)), ("failed", &count(RowState::Failed)), ("skipped", &count(RowState::Skipped))];
+                    tf("bulk.done_summary", &args)
+                }
             };
             ui.label(RichText::new(summary).bold());
             ui.add_space(4.0);
@@ -662,7 +655,7 @@ impl App {
                 .header(text_height, |mut header| {
                     for h in &bulk.headers {
                         header.col(|ui| {
-                            ui.label(RichText::new(*h).bold());
+                            ui.label(RichText::new(t(h)).bold());
                         });
                     }
                 })
@@ -691,7 +684,7 @@ impl App {
             ui.horizontal(|ui| match bulk.stage {
                 Stage::Preview => {
                     let go = ui.add_enabled(bulk.ready() > 0, egui::Button::new(format!("  {}  ", bulk.start)));
-                    let cancel = ui.button("Cancel");
+                    let cancel = ui.button(t("dialog.cancel"));
                     if first {
                         cancel.request_focus();
                     }
@@ -700,11 +693,11 @@ impl App {
                 }
                 Stage::Running => {
                     ui.spinner();
-                    ui.label("Working… this can take a while for a long file.");
+                    ui.label(t("bulk.working"));
                 }
                 Stage::Done => {
-                    save = ui.button("Save results…").clicked();
-                    let ok = ui.button("Close");
+                    save = ui.button(t("bulk.save_results")).clicked();
+                    let ok = ui.button(t("dialog.close"));
                     close |= ok.clicked();
                 }
             });
@@ -715,9 +708,10 @@ impl App {
                 run(self, id);
             }
         if save {
-            let headers = bulk.results_headers.clone();
-            if let Some(path) = self.save_csv("Save results", &bulk.results_name, &headers, &bulk.results) {
-                self.status = format!("Saved results to {}", path.display());
+            let headers: Vec<String> = bulk.results_headers.iter().map(|h| t(h)).collect();
+            let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+            if let Some(path) = self.save_csv(&t("bulk.save_results_title"), &bulk.results_name, &headers, &bulk.results) {
+                self.status = tf("bulk.saved_results", &[("path", &path.display())]);
             }
         }
         !close
@@ -740,8 +734,8 @@ fn find_user(g: &crate::graph::Graph, value: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     match found["value"].as_array().map(Vec::as_slice) {
         Some([user]) => Ok(s(user, "id")),
-        Some([_, _, ..]) => Err("More than one user has this email address".into()),
-        _ => Err("No user has this user principal name or email address".into()),
+        Some([_, _, ..]) => Err(t("bulk.several_users")),
+        _ => Err(t("bulk.no_user")),
     }
 }
 

@@ -11,6 +11,7 @@ use crate::app::{App, Bold};
 use crate::auth::NeedsConsent;
 use crate::dialogs::Dialog;
 use crate::graph::Graph;
+use crate::i18n::{t, tf};
 use crate::model::{group_type, s, sku_name, Node};
 use crate::onboarding::{assigns_licences, managed, Managed, GROUP_SELECT};
 use crate::security::{explain, join, Need};
@@ -19,7 +20,7 @@ use eframe::egui::{self, RichText};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-const PAGES: [&str; 3] = ["Choose what to do", "Preview", "Results"];
+const PAGES: [&str; 3] = ["offboard.page_choose", "offboard.page_preview", "wizard.page_results"];
 const PREVIEW: usize = 1;
 const RESULTS: usize = 2;
 
@@ -109,20 +110,18 @@ pub enum Planned {
 impl Planned {
     pub fn label(&self) -> String {
         match self {
-            Planned::Disable => "Block sign-in (disable the account)".into(),
-            Planned::Revoke => "Revoke sign-in sessions".into(),
-            Planned::RemoveRole { name, .. } => format!("Remove the directory role {name}"),
-            Planned::RemoveEligibleRole { name, active: false, .. } => format!("Remove eligibility for the directory role {name} (PIM)"),
-            Planned::RemoveEligibleRole { name, active: true, .. } => {
-                format!("Remove eligibility for the directory role {name} and end its activation (PIM)")
-            }
-            Planned::Convert { .. } => "Convert the mailbox to a shared mailbox".into(),
+            Planned::Disable => t("offboard.disable"),
+            Planned::Revoke => t("reregister.revoke_step"),
+            Planned::RemoveRole { name, .. } => tf("offboard.step_role", &[("name", name)]),
+            Planned::RemoveEligibleRole { name, active: false, .. } => tf("offboard.step_eligible", &[("name", name)]),
+            Planned::RemoveEligibleRole { name, active: true, .. } => tf("offboard.step_eligible_active", &[("name", name)]),
+            Planned::Convert { .. } => t("offboard.step_convert"),
             Planned::Forward { to, keep_copy, .. } => {
-                format!("Forward email to {to}{}", if *keep_copy { ", keeping a copy" } else { "" })
+                tf(if *keep_copy { "offboard.step_forward_copy" } else { "offboard.step_forward" }, &[("address", to)])
             }
-            Planned::RemoveGroup { name, .. } => format!("Remove from the group {name}"),
-            Planned::RemoveLicence { name, .. } => format!("Remove the licence {name}"),
-            Planned::Delete => "Delete the user account".into(),
+            Planned::RemoveGroup { name, .. } => tf("offboard.step_group", &[("name", name)]),
+            Planned::RemoveLicence { name, .. } => tf("offboard.step_licence", &[("name", name)]),
+            Planned::Delete => t("offboard.step_delete"),
         }
     }
 
@@ -236,26 +235,22 @@ impl Offboarding {
     /// Why the choices can't be run, if they can't.
     fn problem(&self) -> Option<String> {
         if self.found().is_none() {
-            return Some("Wait until the user's details have loaded.".into());
+            return Some(t("offboard.wait"));
         }
         if self.delete && (self.convert || self.forward) {
-            return Some(
-                "A shared mailbox belongs to its user account, so deleting the account deletes the mailbox and stops \
-                 forwarding. Keep the account to keep the mailbox, or untick the mailbox steps."
-                    .into(),
-            );
+            return Some(t("offboard.delete_keeps_mailbox"));
         }
         if self.forward {
             let to = self.forward_to.trim();
             if to.is_empty() || !to.contains('@') || to.contains(char::is_whitespace) {
-                return Some("Enter the address to forward email to, such as manager@contoso.com.".into());
+                return Some(t("offboard.bad_forward"));
             }
             if to.eq_ignore_ascii_case(&self.upn) {
-                return Some("Email can't be forwarded to the same mailbox.".into());
+                return Some(t("offboard.forward_to_self"));
             }
         }
         if self.plan().is_empty() {
-            return Some("Choose at least one thing to do.".into());
+            return Some(t("offboard.nothing_chosen"));
         }
         None
     }
@@ -266,62 +261,38 @@ impl Offboarding {
         let plan: Vec<Planned> = self.plan().into_iter().map(|(p, _)| p).collect();
         let mut out = f.problems.clone();
         if f.user["onPremisesSyncEnabled"] == true {
-            out.push(
-                "The account is synced from Active Directory: blocking sign-in and deleting it fail here, and would be \
-                 undone by the next sync. Do those in Active Directory."
-                    .into(),
-            );
+            out.push(t("offboard.warn_synced"));
         }
         let removes_licence = plan.iter().any(Planned::removes_licence);
         if self.mailbox_kind() == Some("UserMailbox") && removes_licence && !self.convert {
-            out.push(
-                "The mailbox isn't being converted, so once its licence goes it is disabled, and Exchange Online deletes \
-                 it after 30 days. Convert it to a shared mailbox to keep it."
-                    .into(),
-            );
+            out.push(t("offboard.warn_not_converted"));
         }
         if matches!(f.mailbox, Mailbox::Unavailable(_)) && removes_licence {
-            out.push(
-                "The mailbox couldn't be checked. If the user has one, it is disabled once its licence goes and deleted \
-                 after 30 days: check it under Exchange Online before going on."
-                    .into(),
-            );
+            out.push(t("offboard.warn_mailbox_unchecked"));
         }
         if plan.iter().any(|p| matches!(p, Planned::Convert { .. })) {
-            out.push(
-                "A shared mailbox over 50 GB, or with an archive or a litigation hold, still needs a licence. If this one \
-                 does, keep its Exchange Online licence."
-                    .into(),
-            );
+            out.push(t("offboard.warn_large_mailbox"));
             if removes_licence {
-                out.push("Licences are only removed if the mailbox steps succeed.".into());
+                out.push(t("offboard.warn_licences_wait"));
             }
         }
         if self.revoke {
-            out.push(
-                "Revoking sessions makes apps sign in again for a new token, which can take a few minutes to take effect. \
-                 Access tokens already issued stay valid until they expire, usually within an hour."
-                    .into(),
-            );
+            out.push(t("offboard.warn_revoke"));
         }
         for g in f.groups.iter().filter(|g| !g.removable) {
-            out.push(format!("Stays in {}: {}.", g.name, g.note.to_lowercase()));
+            out.push(tf("offboard.warn_stays_in_group", &[("group", &g.name), ("note", &g.note)]));
         }
         let leaving: Vec<&str> = f.groups.iter().filter(|g| g.removable && g.selected).map(|g| g.name.as_str()).collect();
         for l in f.licences.iter().filter(|l| !l.direct) {
             if !l.from_groups.iter().all(|g| leaving.contains(&g.as_str())) {
-                out.push(format!("{} stays, as it comes from the group {}.", l.name, l.from_groups.join(", ")));
+                out.push(tf("offboard.warn_licence_stays", &[("licence", &l.name), ("groups", &l.from_groups.join(", "))]));
             }
         }
         if self.delete {
-            out.push(
-                "Deleting the account removes it from every group, role and application. It can be restored from Deleted \
-                 users for 30 days, then it is gone for good. It only runs if every other step succeeds."
-                    .into(),
-            );
+            out.push(t("offboard.warn_delete"));
         }
         if f.user["userType"] == "Guest" && self.revoke {
-            out.push("This is a guest: revoking sessions doesn't sign them out of their home organisation.".into());
+            out.push(t("offboard.warn_guest"));
         }
         out
     }
@@ -344,15 +315,15 @@ fn step(planned: Planned, needs: Vec<usize>, user_id: String, upn: String) -> St
         Planned::Disable => {
             g.patch(&format!("/users/{user_id}"), &json!({ "accountEnabled": false })).map_err(|e| explain(e, Need::Users))?;
             ctx.disabled = true;
-            Ok("Sign-in blocked".into())
+            Ok(t("offboard.blocked"))
         }
         Planned::Revoke => {
             g.post(&format!("/users/{user_id}/revokeSignInSessions"), &json!({})).map_err(|e| explain(e, Need::Users))?;
-            Ok("Sessions revoked; existing access tokens last until they expire".into())
+            Ok(t("offboard.revoked"))
         }
         Planned::RemoveRole { assignment_id, .. } => {
             g.delete(&format!("/roleManagement/directory/roleAssignments/{assignment_id}"))?;
-            Ok("Removed".into())
+            Ok(t("offboard.removed"))
         }
         Planned::RemoveEligibleRole { role_id, scope, active, .. } => {
             let body = json!({
@@ -363,19 +334,20 @@ fn step(planned: Planned, needs: Vec<usize>, user_id: String, upn: String) -> St
                 "justification": "Offboarding",
             });
             let r = g.post("/roleManagement/directory/roleEligibilityScheduleRequests", &body)?;
-            let mut done = format!("Request {}", s(&r, "status"));
+            let mut done = tf("offboard.request", &[("status", &s(&r, "status"))]);
             // An activation can't be deleted as a plain role assignment; PIM removes it, unless
             // removing the eligibility has ended it already.
             if active && role_assigned(g, &user_id, &role_id, &scope)? {
                 let r = g.post("/roleManagement/directory/roleAssignmentScheduleRequests", &body)?;
-                done.push_str(&format!("; activation removal {}", s(&r, "status")));
+                done.push_str("; ");
+                done.push_str(&tf("offboard.activation_removal", &[("status", &s(&r, "status"))]));
             }
             Ok(done)
         }
         Planned::Convert { identity } => {
             g.invoke("Set-Mailbox", json!({ "Identity": identity, "Type": "Shared" }))?;
             ctx.converted = true;
-            Ok("Converted to a shared mailbox".into())
+            Ok(t("offboard.converted"))
         }
         Planned::Forward { identity, to, keep_copy } => {
             let params = json!({
@@ -385,7 +357,7 @@ fn step(planned: Planned, needs: Vec<usize>, user_id: String, upn: String) -> St
                 "DeliverToMailboxAndForward": keep_copy,
             });
             g.invoke("Set-Mailbox", params)?;
-            Ok(format!("Forwarding to {to}"))
+            Ok(tf("offboard.forwarding", &[("address", &to)]))
         }
         Planned::RemoveGroup { id, exchange, .. } => {
             match exchange {
@@ -395,16 +367,16 @@ fn step(planned: Planned, needs: Vec<usize>, user_id: String, upn: String) -> St
                 }
                 None => g.delete(&format!("/groups/{id}/members/{user_id}/$ref"))?,
             }
-            Ok("Removed".into())
+            Ok(t("offboard.removed"))
         }
         Planned::RemoveLicence { sku_id, .. } => {
             g.post(&format!("/users/{user_id}/assignLicense"), &json!({ "addLicenses": [], "removeLicenses": [sku_id] }))?;
-            Ok("Removed".into())
+            Ok(t("offboard.removed"))
         }
         Planned::Delete => {
             g.delete(&format!("/users/{user_id}"))?;
             ctx.deleted = true;
-            Ok("Deleted; it can be restored for 30 days".into())
+            Ok(t("offboard.deleted"))
         }
     })
 }
@@ -434,7 +406,7 @@ fn load(g: &Graph, user_id: &str, upn: &str) -> anyhow::Result<(Found, bool)> {
             groups
         }
         Err(e) => {
-            problems.push(format!("The groups couldn't be read, so none are removed: {e}"));
+            problems.push(tf("offboard.groups_unread", &[("error", &e)]));
             Vec::new()
         }
     };
@@ -451,7 +423,7 @@ fn load(g: &Graph, user_id: &str, upn: &str) -> anyhow::Result<(Found, bool)> {
         Err(e) if e.to_string().contains("couldn't be found") => (Mailbox::None, false),
         Err(e) => {
             let consent = e.downcast_ref::<NeedsConsent>().is_some();
-            problems.push(format!("The mailbox couldn't be checked, so the mailbox steps are unavailable: {e}"));
+            problems.push(tf("offboard.mailbox_unread", &[("error", &e)]));
             (Mailbox::Unavailable(e.to_string()), consent)
         }
     };
@@ -473,7 +445,7 @@ fn load_roles(g: &Graph, user_id: &str) -> (Vec<RoleItem>, Vec<String>) {
             active: false,
             selected: true,
         })),
-        Err(e) => problems.push(format!("The directory roles couldn't be read, so none are removed: {e}")),
+        Err(e) => problems.push(tf("offboard.roles_unread", &[("error", &e)])),
     }
     // Eligible assignments need PIM, so a tenant without Entra ID P2 can't list them.
     match g.list(&format!(
@@ -499,10 +471,7 @@ fn load_roles(g: &Graph, user_id: &str) -> (Vec<RoleItem>, Vec<String>) {
                     .collect();
                 merge_activated(&mut roles, &activated);
             }
-            Err(e) => problems.push(format!(
-                "Roles activated through PIM couldn't be told apart, so removing one may fail and stop the account \
-                 being deleted: {e}"
-            )),
+            Err(e) => problems.push(tf("offboard.activations_unread", &[("error", &e)])),
         }
     }
     (roles, problems)
@@ -527,14 +496,14 @@ fn merge_activated(roles: &mut Vec<RoleItem>, activated: &[(String, String)]) {
     for r in roles.iter_mut().filter(|r| r.assignment_id.is_none()) {
         r.active = is_activated(r);
         if r.active {
-            r.name.push_str(", active now");
+            r.name = tf("offboard.active_now", &[("role", &r.name)]);
         }
     }
 }
 
 /// A role's name, with its scope when it isn't the whole directory.
 fn scoped(name: &str, scope: &str) -> String {
-    if scope.is_empty() || scope == "/" { name.to_string() } else { format!("{name} (scope {scope})") }
+    if scope.is_empty() || scope == "/" { name.to_string() } else { tf("offboard.scoped", &[("role", &name), ("scope", &scope)]) }
 }
 
 /// Whether the user can be taken out of a group here, and how.
@@ -542,13 +511,13 @@ pub fn group_item(v: &Value) -> GroupItem {
     let managed = managed(v);
     let assigns_licences = assigns_licences(v);
     let (removable, mut note) = match managed {
-        Managed::Dynamic => (false, "Dynamic membership, set by its rule".to_string()),
-        Managed::Synced => (false, "Synced from Active Directory, so it is changed there".into()),
-        Managed::Exchange => (true, "Changed in Exchange Online".into()),
+        Managed::Dynamic => (false, t("offboard.group_dynamic")),
+        Managed::Synced => (false, t("offboard.group_synced")),
+        Managed::Exchange => (true, t("offboard.group_exchange")),
         Managed::Graph => (true, String::new()),
     };
     if assigns_licences {
-        note = if note.is_empty() { "Assigns licences".into() } else { format!("{note}; assigns licences") };
+        note = if note.is_empty() { t("onboard.group_licences") } else { format!("{note}. {}", t("onboard.group_licences")) };
     }
     let identity = match s(v, "mail") {
         m if m.is_empty() => s(v, "id"),
@@ -593,7 +562,7 @@ impl App {
         let name = s(&user, "displayName");
         let upn = s(&user, "userPrincipalName");
         if !self.account.is_empty() && upn.eq_ignore_ascii_case(&self.account) {
-            self.push(Dialog::message("Offboard user", "You can't offboard the account you are signed in with."));
+            self.push(Dialog::message(&t("offboard.title"), &t("offboard.not_yourself")));
             return;
         }
         let wizard = Offboarding {
@@ -615,7 +584,7 @@ impl App {
         let id = self.push(Dialog::Offboard(Box::new(wizard)));
         let user_id = s(&user, "id");
         let upn = s(&user, "userPrincipalName");
-        self.spawn(format!("Reading {name}…"), move |g| load(g, &user_id, &upn), move |app, r| {
+        self.spawn(tf("offboard.reading", &[("name", &name)]), move |g| load(g, &user_id, &upn), move |app, r| {
             let mut consent = false;
             if let Some(Dialog::Offboard(w)) = app.dialog_mut(id) {
                 w.found = match r {
@@ -640,7 +609,7 @@ impl App {
         let steps: Vec<Step<Graph, Ctx>> =
             w.plan().into_iter().map(|(p, needs)| step(p, needs, user_id.clone(), upn.clone())).collect();
         let id = user_id.clone();
-        let progress = self.run_workflow(&format!("Offboard {upn}"), Ctx::default(), steps, move |app, ctx, _| {
+        let progress = self.run_workflow(&tf("offboard.task", &[("name", &upn)]), Ctx::default(), steps, move |app, ctx, _| {
             if ctx.deleted {
                 app.remove_obj(Node::Users, &id);
                 app.remove_obj(Node::Mailboxes, &id);
@@ -661,39 +630,32 @@ impl App {
         let mut back = false;
         modal.show(ctx, |ui| {
             ui.set_width(760.0);
-            workflow::page_heading(ui, &format!("Offboard {}", w.name), &PAGES, w.page);
+            workflow::page_heading(ui, &tf("offboard.task", &[("name", &w.name)]), &PAGES, w.page);
             egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| match w.page {
                 0 => offboarding_choices(ui, w),
                 PREVIEW => {
-                    ui.label(RichText::new(format!("These changes will be made to {}, in this order:", w.upn)).bold());
+                    ui.label(RichText::new(tf("offboard.preview_intro", &[("upn", &w.upn)])).bold());
                     ui.add_space(4.0);
                     for (i, (p, needs)) in w.plan().iter().enumerate() {
+                        let steps = needs.iter().map(|n| (n + 1).to_string()).collect::<Vec<_>>().join(", ");
                         let after = match needs.len() {
                             0 => String::new(),
-                            n if *p == Planned::Delete => format!("  (only if all {n} steps before it succeed)"),
-                            _ => format!(
-                                "  (only if step{} {} succeed{})",
-                                if needs.len() == 1 { "" } else { "s" },
-                                needs.iter().map(|n| (n + 1).to_string()).collect::<Vec<_>>().join(" and "),
-                                if needs.len() == 1 { "s" } else { "" }
-                            ),
+                            n if *p == Planned::Delete => format!("  ({})", tf("offboard.only_if_all", &[("count", &n)])),
+                            1 => format!("  ({})", tf("offboard.only_if_step", &[("step", &steps)])),
+                            _ => format!("  ({})", tf("offboard.only_if_steps", &[("steps", &steps)])),
                         };
                         ui.label(format!("{}. {}{after}", i + 1, p.label()));
                     }
                     let warnings = w.warnings();
                     if !warnings.is_empty() {
                         ui.add_space(8.0);
-                        ui.label(RichText::new("Before you go on").bold());
+                        ui.label(RichText::new(t("offboard.before_you_go_on")).bold());
                         for warning in warnings {
                             ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {warning}"));
                         }
                     }
                     ui.add_space(8.0);
-                    let check = if w.delete {
-                        "I have checked these changes, including deleting the account"
-                    } else {
-                        "I have checked these changes"
-                    };
+                    let check = t(if w.delete { "offboard.checked_delete" } else { "offboard.checked" });
                     ui.checkbox(&mut w.confirmed, check);
                 }
                 _ => {
@@ -709,23 +671,24 @@ impl App {
             ui.separator();
             if w.page == RESULTS {
                 if let Some(p) = w.progress.clone() {
-                    close |= workflow::report_buttons(self, ui, &format!("Offboarding {}", w.upn), "offboarding report.csv", &p);
+                    let file = format!("{}.csv", t("offboard.report_file"));
+                    close |= workflow::report_buttons(self, ui, &tf("offboard.report_title", &[("upn", &w.upn)]), &file, &p);
                 }
                 return;
             }
             ui.horizontal(|ui| {
-                if w.page > 0 && ui.button("  Back  ").clicked() {
+                if w.page > 0 && ui.button(format!("  {}  ", t("wizard.back"))).clicked() {
                     back = true;
                 }
                 let (label, enabled) = if w.page == PREVIEW {
-                    (format!("  Run {} steps  ", w.plan().len()), w.confirmed)
+                    (tf("offboard.run", &[("count", &w.plan().len())]), w.confirmed)
                 } else {
-                    ("  Next  ".to_string(), w.found().is_some())
+                    (t("wizard.next"), w.found().is_some())
                 };
-                if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                if ui.add_enabled(enabled, egui::Button::new(format!("  {label}  "))).clicked() {
                     next = true;
                 }
-                close |= ui.button("Cancel").clicked();
+                close |= ui.button(t("dialog.cancel")).clicked();
             });
         });
         if back {
@@ -752,74 +715,72 @@ fn offboarding_choices(ui: &mut egui::Ui, w: &mut Offboarding) {
         Loadable::Loading => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(format!("Reading {}'s groups, roles, licences and mailbox…", w.name));
+                ui.label(tf("offboard.reading_all", &[("name", &w.name)]));
             });
             return;
         }
         Loadable::Failed(e) => {
-            ui.colored_label(ui.visuals().error_fg_color, format!("⚠ Could not read the user: {e}"));
+            ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {}", tf("offboard.read_failed", &[("error", e)])));
             return;
         }
         Loadable::Ready(f) => f,
     };
-    let weak = |t: &str| RichText::new(t).small().weak();
-    let section = |ui: &mut egui::Ui, t: &str| {
+    let weak = |text: &str| RichText::new(text).small().weak();
+    let section = |ui: &mut egui::Ui, key: &str| {
         ui.add_space(6.0);
-        ui.label(RichText::new(t).bold());
+        ui.label(RichText::new(t(key)).bold());
     };
-    ui.label(format!(
-        "{} · account {}",
-        w.upn,
-        if found.user["accountEnabled"] == false { "already disabled" } else { "enabled" }
-    ));
+    let state = if found.user["accountEnabled"] == false { "offboard.account_disabled" } else { "offboard.account_enabled" };
+    ui.label(format!("{} · {}", w.upn, t(state)));
 
-    section(ui, "Sign-in");
-    ui.checkbox(&mut w.disable, "Block sign-in (disable the account)");
-    ui.checkbox(&mut w.revoke, "Revoke sign-in sessions");
+    section(ui, "offboard.section_sign_in");
+    ui.checkbox(&mut w.disable, t("offboard.disable"));
+    ui.checkbox(&mut w.revoke, t("reregister.revoke_step"));
 
-    section(ui, "Directory roles");
+    section(ui, "tab.roles");
     if found.roles.is_empty() {
-        ui.label(weak("No directory roles."));
+        ui.label(weak(&t("offboard.no_roles")));
     }
     for r in &mut found.roles {
-        let kind = if r.assignment_id.is_some() { "active" } else { "eligible (PIM)" };
-        ui.checkbox(&mut r.selected, format!("Remove {} ({kind})", r.name));
+        let key = if r.assignment_id.is_some() { "offboard.remove_active_role" } else { "offboard.remove_eligible_role" };
+        ui.checkbox(&mut r.selected, tf(key, &[("role", &r.name)]));
     }
 
-    section(ui, "Mailbox");
+    section(ui, "offboard.section_mailbox");
     let delete = w.delete;
     match &found.mailbox {
         Mailbox::None => {
-            ui.label(weak("No Exchange Online mailbox."));
+            ui.label(weak(&t("offboard.no_mailbox")));
         }
         Mailbox::Unavailable(e) => {
-            ui.label(weak(&format!("Couldn't check the mailbox: {e}")));
+            ui.label(weak(&tf("offboard.mailbox_unchecked", &[("error", e)])));
         }
         Mailbox::Found { kind, .. } => {
             let user_mailbox = kind == "UserMailbox";
             if user_mailbox {
-                ui.add_enabled(!delete, egui::Checkbox::new(&mut w.convert, "Convert to a shared mailbox, so it can be kept without a licence"));
+                ui.add_enabled(!delete, egui::Checkbox::new(&mut w.convert, t("offboard.convert")));
             } else {
-                ui.label(weak(&format!("The mailbox is already a {} mailbox.", crate::exchange::mailbox_type(&json!({ "RecipientTypeDetails": kind })).to_lowercase())));
+                let kind = crate::exchange::mailbox_type(&json!({ "RecipientTypeDetails": kind }));
+                ui.label(weak(&tf("offboard.already_kind", &[("kind", &kind)])));
             }
             ui.horizontal(|ui| {
-                ui.add_enabled(!delete, egui::Checkbox::new(&mut w.forward, "Forward email to"));
+                ui.add_enabled(!delete, egui::Checkbox::new(&mut w.forward, t("field.forward_to")));
                 ui.add_enabled(w.forward && !delete, egui::TextEdit::singleline(&mut w.forward_to).hint_text("manager@contoso.com").desired_width(260.0));
             });
-            ui.add_enabled(w.forward && !delete, egui::Checkbox::new(&mut w.keep_copy, "Keep a copy in the mailbox when forwarding"));
-            ui.label(weak("To give someone access to the mailbox, add Full Access on its Mailbox permissions tab under Exchange Online."));
+            ui.add_enabled(w.forward && !delete, egui::Checkbox::new(&mut w.keep_copy, t("field.keep_copy")));
+            ui.label(weak(&t("offboard.full_access_note")));
         }
     }
 
-    section(ui, "Groups");
+    section(ui, "node.groups");
     if found.groups.is_empty() {
-        ui.label(weak("Not a member of any group."));
+        ui.label(weak(&t("offboard.no_groups")));
     } else {
         ui.horizontal(|ui| {
-            if ui.small_button("Select all").clicked() {
+            if ui.small_button(t("offboard.select_all")).clicked() {
                 found.groups.iter_mut().for_each(|g| g.selected = g.removable);
             }
-            if ui.small_button("Select none").clicked() {
+            if ui.small_button(t("offboard.select_none")).clicked() {
                 found.groups.iter_mut().for_each(|g| g.selected = false);
             }
         });
@@ -833,23 +794,23 @@ fn offboarding_choices(ui: &mut egui::Ui, w: &mut Offboarding) {
         });
     }
 
-    section(ui, "Licences");
+    section(ui, "tab.licences");
     if found.licences.is_empty() {
-        ui.label(weak("No licences."));
+        ui.label(weak(&t("offboard.no_licences")));
     }
     for l in &mut found.licences {
         if l.direct {
-            ui.checkbox(&mut l.selected, format!("Remove {}", l.name));
+            ui.checkbox(&mut l.selected, tf("offboard.remove_licence", &[("licence", &l.name)]));
         } else {
-            ui.label(weak(&format!("{}: from the group {}, so it goes when they leave it", l.name, l.from_groups.join(", "))));
+            ui.label(weak(&tf("offboard.inherited_licence", &[("licence", &l.name), ("groups", &l.from_groups.join(", "))])));
         }
     }
 
-    section(ui, "Account");
+    section(ui, "overview.account");
     let keeps_mailbox = w.convert || w.forward;
-    ui.add_enabled(!keeps_mailbox, egui::Checkbox::new(&mut w.delete, "Delete the user account (it can be restored for 30 days)"));
+    ui.add_enabled(!keeps_mailbox, egui::Checkbox::new(&mut w.delete, t("offboard.delete_account")));
     if keeps_mailbox {
-        ui.label(weak("Unavailable while the mailbox is kept or forwarded, as deleting the account deletes its mailbox."));
+        ui.label(weak(&t("offboard.delete_unavailable")));
     }
 }
 

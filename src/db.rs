@@ -8,6 +8,7 @@
 use crate::app::App;
 use crate::config::Settings;
 use crate::dialogs::{Dialog, Field, Form};
+use crate::i18n::{self, t, tf};
 use crate::model::{Node, s};
 use anyhow::Context;
 use mysql::prelude::Queryable;
@@ -54,12 +55,8 @@ fn check_existing(table: &str, existing: &[String], columns: &[String]) -> anyho
     if existing.is_empty() || (has(&columns[0]) && has("exported_at")) {
         Ok(())
     } else {
-        anyhow::bail!(
-            "The table {table} already exists and was not made by this export of the {}: it has no `{}` \
-             and `exported_at` columns. Choose another table name.",
-            if columns[0] == "sku_id" { "licences" } else { "list" },
-            columns[0]
-        )
+        let key = if columns[0] == "sku_id" { "db.not_ours_licences" } else { "db.not_ours" };
+        anyhow::bail!(tf(key, &[("table", &table), ("column", &columns[0])]))
     }
 }
 
@@ -102,7 +99,7 @@ pub fn export(target: &Target, columns: &[String], rows: &[Vec<String>]) -> anyh
         opts = opts.ssl_opts(mysql::SslOpts::default());
     }
     let mut conn = mysql::Conn::new(opts)
-        .with_context(|| format!("could not connect to {}:{}", target.host, target.port))?;
+        .with_context(|| tf("db.connect_failed", &[("host", &target.host), ("port", &target.port)]))?;
     log::info!("Connected to MariaDB at {}:{} as {}", target.host, target.port, target.user);
 
     let table = &target.table;
@@ -111,20 +108,20 @@ pub fn export(target: &Target, columns: &[String], rows: &[Vec<String>]) -> anyh
             "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
             (table,),
         )
-        .with_context(|| format!("could not look up the table {table}"))?;
+        .with_context(|| tf("db.lookup_failed", &[("table", table)]))?;
     check_existing(table, &existing, columns)?;
     // DDL commits implicitly in MariaDB, so the table is prepared before the transaction starts.
     for sql in schema_sql(table, columns) {
         log::debug!("SQL: {sql}");
-        conn.query_drop(&sql).with_context(|| format!("could not prepare the table {table}"))?;
+        conn.query_drop(&sql).with_context(|| tf("db.prepare_failed", &[("table", table)]))?;
     }
     let mut tx = conn.start_transaction(mysql::TxOpts::default())?;
     tx.query_drop("SET @exported_at = UTC_TIMESTAMP(6)")?;
     tx.exec_batch(insert_sql(table, columns), rows.iter().cloned())
-        .with_context(|| format!("could not write to the table {table}"))?;
+        .with_context(|| tf("db.write_failed", &[("table", table)]))?;
     if target.replace {
         tx.query_drop(format!("DELETE FROM `{table}` WHERE `exported_at` <> @exported_at"))
-            .with_context(|| format!("could not remove old rows from {table}"))?;
+            .with_context(|| tf("db.remove_failed", &[("table", table)]))?;
     }
     tx.commit()?;
     Ok(())
@@ -135,35 +132,34 @@ impl App {
     pub fn export_database(&mut self) {
         let node = self.node;
         let set = &self.settings;
-        let form = Form::new("Export to MariaDB", "Export")
-            .intro(
-                "Saves the list as shown to a table, created if it does not exist. Exporting again \
-                 updates rows by object ID. The password is not saved.",
-            )
-            .field(Field::text("host", "Server", &set.db_host).required())
-            .field(Field::text("port", "Port", &set.db_port.to_string()).required())
-            .field(Field::text("user", "User name", &set.db_user).required())
-            .field(Field::password("password", "Password", ""))
-            .field(Field::text("database", "Database", &set.db_name).required())
-            .field(Field::text("table", "Table", &format!("entra_{}", column_name(node.title()))).required())
-            .field(Field::check("tls", "Encrypt the connection (TLS)", set.db_tls))
-            .field(Field::check("replace", "Remove rows for objects not in this list", false))
+        // Named in English, as the columns are, whatever the language of the interface.
+        let table = format!("entra_{}", column_name(&i18n::in_english(|| node.title())));
+        let form = Form::new(&t("db.title"), &t("db.export"))
+            .intro(&t("db.intro"))
+            .field(Field::text("host", &t("db.server"), &set.db_host).required())
+            .field(Field::text("port", &t("db.port"), &set.db_port.to_string()).required())
+            .field(Field::text("user", &t("field.user_name"), &set.db_user).required())
+            .field(Field::password("password", &t("field.password"), ""))
+            .field(Field::text("database", &t("db.database"), &set.db_name).required())
+            .field(Field::text("table", &t("db.table"), &table).required())
+            .field(Field::check("tls", &t("db.tls"), set.db_tls))
+            .field(Field::check("replace", &t("db.replace"), false))
             .on_submit(move |app, f| {
                 let port = f.text("port").parse::<u16>().ok().filter(|&p| p != 0);
                 let Some(port) = port else {
-                    return Err("Port must be a number from 1 to 65535.".into());
+                    return Err(t("db.bad_port"));
                 };
                 let table = f.text("table");
                 if !valid_table(&table) {
-                    return Err("Table may only contain letters, digits and underscores.".into());
+                    return Err(t("db.bad_table"));
                 }
                 // Removing rows on an empty or partial list would delete objects that still exist.
                 if f.checked("replace") {
                     if let Some(why) = app.incomplete_list(node) {
-                        return Err(format!("{why} Untick \"Remove rows…\" to export what is shown."));
+                        return Err(tf("db.incomplete", &[("why", &why)]));
                     }
                     if app.view_rows().is_empty() {
-                        return Err("The list is empty, so every row would be removed. Untick \"Remove rows…\" to export.".into());
+                        return Err(t("db.empty"));
                     }
                 }
                 let target = Target {
@@ -197,24 +193,36 @@ impl App {
     fn run_database_export(&mut self, node: Node, target: Target) {
         let cols = node.columns();
         let (id_header, id_key) = if node == Node::Licences { ("SKU ID", "skuId") } else { ("Object ID", "id") };
-        let columns: Vec<String> =
-            std::iter::once(id_header).chain(cols.iter().map(|c| c.title)).map(column_name).collect();
-        let rows: Vec<Vec<String>> = self
-            .view_rows()
-            .into_iter()
-            .map(|v| std::iter::once(s(v, id_key)).chain(cols.iter().map(|c| (c.get)(v))).collect())
-            .collect();
-        let what = node.title().to_lowercase();
-        let place = format!("{}.{} on {}", target.database, target.table, target.host);
+        // The column names and values are in English whatever the language of the interface, so
+        // the table reads the same, and exporting again updates it rather than adding columns.
+        let (columns, rows) = i18n::in_english(|| {
+            let columns: Vec<String> = std::iter::once(id_header.to_string())
+                .chain(cols.iter().map(|c| t(c.title)))
+                .map(|title| column_name(&title))
+                .collect();
+            let rows: Vec<Vec<String>> = self
+                .view_rows()
+                .into_iter()
+                .map(|v| std::iter::once(s(v, id_key)).chain(cols.iter().map(|c| (c.get)(v))).collect())
+                .collect();
+            (columns, rows)
+        });
+        let list = node.list_name();
+        let place = (target.database.clone(), target.table.clone(), target.host.clone());
+        let args: [(&str, &dyn std::fmt::Display); 4] =
+            [("list", &list), ("database", &place.0), ("table", &place.1), ("host", &place.2)];
+        let label = tf("db.exporting", &args);
         self.spawn(
-            format!("Exporting {what} to {place}…"),
+            label,
             move |_| export(&target, &columns, &rows).map(|()| rows.len()),
             move |app, r| match r {
                 Ok(n) => {
-                    app.status = format!("Exported {n} {what} to {place}");
-                    log::info!("{}", app.status);
+                    log::info!("Exported {n} {node:?} to {}.{} on {}", place.0, place.1, place.2);
+                    let args: [(&str, &dyn std::fmt::Display); 5] =
+                        [("count", &n), ("list", &list), ("database", &place.0), ("table", &place.1), ("host", &place.2)];
+                    app.status = tf("db.exported", &args);
                 }
-                Err(e) => app.error("Export to MariaDB", format!("{e:#}")),
+                Err(e) => app.error(&t("db.title"), format!("{e:#}")),
             },
         );
     }
@@ -244,7 +252,7 @@ mod tests {
     #[test]
     fn every_list_has_distinct_column_names() {
         for node in [Node::Users, Node::Groups, Node::Devices, Node::Applications, Node::Mailboxes, Node::DistributionLists, Node::Licences] {
-            let mut names: Vec<String> = node.columns().iter().map(|c| column_name(c.title)).collect();
+            let mut names: Vec<String> = node.columns().iter().map(|c| column_name(i18n::english(c.title).unwrap())).collect();
             names.extend(["object_id".into(), "sku_id".into(), "exported_at".into()]);
             let count = names.len();
             names.sort();

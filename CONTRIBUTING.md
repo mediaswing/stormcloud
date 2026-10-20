@@ -91,8 +91,9 @@ This app changes a real organisation's directory, so mistakes matter.
 - Passwords, client secrets, tokens and Temporary Access Passes are never
   written to the debug log. Nor are phone numbers or sign-in details.
 - The app only talks to the sign-in, Graph and Exchange endpoints in
-  `settings.ini`, to `api.github.com` to check for updates, and to a MariaDB
-  server if the user has set one up. Every network request must be something
+  `settings.ini`, to `api.github.com` to check for updates, to a MariaDB
+  server if the user has set one up, and to Ollama on the same computer
+  (`127.0.0.1:11434`) when the user translates the app. Every network request must be something
   the user can understand and, where it isn't essential, turn off. Describe any
   new one in the README.
 - Phone numbers and email addresses used for sign-in are masked when they're
@@ -121,6 +122,17 @@ Status messages, labels, the README and the changelog are written for the
 people who use the app, in plain British English. Prefer short sentences and
 everyday words, and use Microsoft's own names for things in Entra ID and
 Exchange Online. The same goes for code comments.
+
+Every label and message the app shows lives in the `ENGLISH` list in
+`src/i18n.rs`, under a key, so that it can be translated. Use `t("key")` or
+`tf("key", &[("name", &value)])` rather than writing the text in place, and
+write values as `{name}` rather than building sentences from pieces, since
+word order differs between languages. Tables of labels, such as column titles,
+hold keys and look them up when they're shown. Tests check that every key in
+the code has English text and that every English text is used. Log messages
+stay in English, and so does anything exported to a file or database that has
+to read the same each time: wrap it in `i18n::in_english`. Never decide
+anything from translated text; keep a flag or the key instead.
 
 ### 7. Few dependencies
 

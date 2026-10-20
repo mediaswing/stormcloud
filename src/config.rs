@@ -61,6 +61,9 @@ pub struct Settings {
     pub db_user: String,
     pub db_name: String,
     pub db_tls: bool,
+    /// The interface language, such as `fr` (see `i18n`), and the Ollama model that translates it.
+    pub language: String,
+    pub translation_model: String,
 }
 
 impl Default for Settings {
@@ -83,6 +86,8 @@ impl Default for Settings {
             db_user: String::new(),
             db_name: String::new(),
             db_tls: false,
+            language: crate::i18n::ENGLISH_CODE.to_string(),
+            translation_model: String::new(),
         }
     }
 }
@@ -168,6 +173,12 @@ impl Settings {
         if let Some(v) = get("mariadb", "tls") {
             s.db_tls = matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "1");
         }
+        if let Some(v) = get("interface", "language").filter(|v| !v.is_empty()) {
+            s.language = v;
+        }
+        if let Some(v) = get("interface", "translation_model") {
+            s.translation_model = v;
+        }
         Ok(s)
     }
 
@@ -209,7 +220,13 @@ impl Settings {
              port = {}\n\
              user = {}\n\
              database = {}\n\
-             tls = {}\n",
+             tls = {}\n\
+             \n\
+             [interface]\n\
+             ; The language of the app, such as fr, translated into the languages folder here.\n\
+             language = {}\n\
+             ; The Ollama model that translates the app.\n\
+             translation_model = {}\n",
             self.tenant_id.trim(),
             self.client_id.trim(),
             self.remember_sign_in,
@@ -227,6 +244,8 @@ impl Settings {
             self.db_user.trim(),
             self.db_name.trim(),
             self.db_tls,
+            self.language.trim(),
+            self.translation_model.trim(),
         );
         fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
         Ok(path)

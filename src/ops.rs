@@ -4,6 +4,7 @@ use crate::app::App;
 use crate::config::Settings;
 use crate::dialogs::{Dialog, Field, Form, PickItem, Picker};
 use crate::graph::{odata_str, Graph};
+use crate::i18n::{t, tf};
 use crate::model::{s, sku_name, Node};
 use crate::sheets::Sheet;
 use eframe::egui::{Key, KeyboardShortcut, Modifiers};
@@ -125,56 +126,53 @@ pub fn collection(node: Node) -> &'static str {
 impl App {
     pub fn act_label(&self, act: Act) -> String {
         let enabled = self.selected().and_then(|o| o["accountEnabled"].as_bool()).unwrap_or(true);
-        match act {
-            Act::Open => "Open".into(),
-            Act::Refresh => "Refresh".into(),
+        t(match act {
+            Act::Open => "act.open",
+            Act::Refresh => "act.refresh",
             Act::New => match self.node {
-                Node::Users => "New user…",
-                Node::Groups => "New group…",
-                Node::Mailboxes => "New shared mailbox…",
-                Node::DistributionLists => "New distribution list…",
-                _ => "New…",
-            }
-            .into(),
-            Act::Properties => "Properties".into(),
+                Node::Users => "act.new_user",
+                Node::Groups => "act.new_group",
+                Node::Mailboxes => "act.new_shared_mailbox",
+                Node::DistributionLists => "act.new_distribution_list",
+                _ => "act.new",
+            },
+            Act::Properties => "act.properties",
             Act::ToggleEnabled => match (self.node, enabled) {
-                (Node::Users, true) => "Disable account",
-                (Node::Users, false) => "Enable account",
-                (Node::Applications, true) => "Disable sign-in",
-                (Node::Applications, false) => "Enable sign-in",
-                (_, true) => "Disable",
-                (_, false) => "Enable",
-            }
-            .into(),
-            Act::ResetPassword => "Reset password…".into(),
-            Act::AssignLicence => "Assign licence…".into(),
-            Act::AddToGroup => "Add to group…".into(),
-            Act::AddMember => "Add member…".into(),
-            Act::AssignRole => "Assign directory role…".into(),
-            Act::AssignToUser if self.node == Node::Applications => "Assign users and groups…".into(),
-            Act::AssignToUser => "Assign to user…".into(),
-            Act::Delete => "Delete".into(),
-            Act::ExportList => "Export list…".into(),
-            Act::ExportDatabase => "Export to MariaDB…".into(),
-            Act::ImportUsers => "Import users from CSV…".into(),
-            Act::ImportMembers => "Add members from CSV…".into(),
-            Act::Forwarding => "Forwarding…".into(),
-            Act::AutoReplies => "Automatic replies…".into(),
+                (Node::Users, true) => "act.disable_account",
+                (Node::Users, false) => "act.enable_account",
+                (Node::Applications, true) => "act.disable_sign_in",
+                (Node::Applications, false) => "act.enable_sign_in",
+                (_, true) => "act.disable",
+                (_, false) => "act.enable",
+            },
+            Act::ResetPassword => "act.reset_password",
+            Act::AssignLicence => "act.assign_licence",
+            Act::AddToGroup => "act.add_to_group",
+            Act::AddMember => "act.add_member",
+            Act::AssignRole => "act.assign_role",
+            Act::AssignToUser if self.node == Node::Applications => "act.assign_users_groups",
+            Act::AssignToUser => "act.assign_to_user",
+            Act::Delete => "act.delete",
+            Act::ExportList => "act.export_list",
+            Act::ExportDatabase => "act.export_database",
+            Act::ImportUsers => "act.import_users",
+            Act::ImportMembers => "act.import_members",
+            Act::Forwarding => "act.forwarding",
+            Act::AutoReplies => "act.auto_replies",
             Act::ConvertMailbox => match self.selected().map(|o| s(o, "RecipientTypeDetails")).as_deref() {
-                Some("SharedMailbox") => "Convert to user mailbox",
-                _ => "Convert to shared mailbox",
-            }
-            .into(),
-            Act::Onboard => "Onboard user…".into(),
-            Act::Offboard => "Offboard user…".into(),
-            Act::Security => "Authentication & security…".into(),
-            Act::RevokeSessions => "Revoke sessions…".into(),
-            Act::TemporaryAccessPass => "Temporary Access Pass…".into(),
-        }
+                Some("SharedMailbox") => "act.convert_to_user",
+                _ => "act.convert_to_shared",
+            },
+            Act::Onboard => "act.onboard",
+            Act::Offboard => "act.offboard",
+            Act::Security => "act.security",
+            Act::RevokeSessions => "act.revoke_sessions",
+            Act::TemporaryAccessPass => "act.temporary_access_pass",
+        })
     }
 
     pub fn run_act(&mut self, act: Act) {
-        log::debug!("Command {act:?} on {}", self.node.title());
+        log::debug!("Command {act:?} on {:?}", self.node);
         let node = self.node;
         let obj = self.selected().cloned();
         if act.needs_selection() && obj.is_none() {
@@ -201,34 +199,30 @@ impl App {
             Act::ResetPassword => self.reset_password(id, name),
             Act::AssignLicence => {
                 let coll = collection(node);
-                self.pick_sku(&format!("Assign licence to {name}"), move |app, sku| {
+                self.pick_sku(&tf("pick.assign_licence_to", &[("name", &name)]), move |app, sku| {
                     app.set_licence(coll, &id, &sku.id, true, move |app| app.load(node));
                 });
             }
-            Act::AddToGroup => self.pick_group(&format!("Add {name} to group"), move |app, g| {
+            Act::AddToGroup => self.pick_group(&tf("pick.add_to_group", &[("name", &name)]), move |app, g| {
                 app.add_member(&g.id, &id, |_| {});
             }),
             Act::AddMember if node == Node::DistributionLists => self.add_list_member(obj, |_| {}),
-            Act::AddMember => self.pick_principal(&format!("Add member to {name}"), move |app, m| {
+            Act::AddMember => self.pick_principal(&tf("pick.add_member_to", &[("name", &name)]), move |app, m| {
                 app.add_member(&id, &m.id, |_| {});
             }),
             Act::AssignRole => {
                 if node == Node::Groups && obj["isAssignableToRole"] != true {
-                    self.push(Dialog::message(
-                        "Assign directory role",
-                        "Directory roles can only be assigned to groups created as role-assignable \
-                         (isAssignableToRole). This can only be set when a group is created.",
-                    ));
+                    self.push(Dialog::message(&t("task.assign_role"), &t("ops.role_assignable_only")));
                     return;
                 }
-                self.pick_role(&format!("Assign directory role to {name}"), move |app, role| {
+                self.pick_role(&tf("pick.assign_role_to", &[("name", &name)]), move |app, role| {
                     app.assign_role(&id, &role.id, |_| {});
                 });
             }
             Act::AssignToUser if node == Node::Applications => self.assign_app(obj, |_| {}),
             Act::AssignToUser => {
                 let sku = s(&obj, "skuId");
-                self.pick_user(&format!("Assign {name} to user"), move |app, u| {
+                self.pick_user(&tf("pick.assign_to_user", &[("name", &name)]), move |app, u| {
                     app.set_licence("users", &u.id, &sku, true, |app| app.load(Node::Licences));
                 });
             }
@@ -261,9 +255,9 @@ impl App {
     ) {
         let title = label.to_string();
         log::info!("Action: {title}");
-        self.spawn(format!("{label}…"), work, move |app, r| match r {
+        self.spawn(tf("status.working", &[("task", &label)]), work, move |app, r| match r {
             Ok(()) => {
-                app.status = format!("{title}: done");
+                app.status = tf("status.done", &[("task", &title)]);
                 after(app);
             }
             Err(e) => app.error(&title, e),
@@ -273,29 +267,27 @@ impl App {
     // ----- settings ------------------------------------------------------
 
     pub fn open_settings(&mut self) {
-        if self.dialogs.iter().any(|d| matches!(&d.dialog, Dialog::Form(f) if f.title == "Settings")) {
+        let title = t("settings.title");
+        if self.dialogs.iter().any(|d| matches!(&d.dialog, Dialog::Form(f) if f.title == title)) {
             return;
         }
         let s = &self.settings;
-        let form = Form::new("Settings", "Save")
-            .intro(
-                "Enter the directory (tenant) ID and the application (client) ID of an app registration \
-                 with \"Allow public client flows\" enabled and delegated Microsoft Graph permissions.",
-            )
-            .field(Field::text("tenant", "Tenant ID", &s.tenant_id).required())
-            .field(Field::text("client", "Client ID", &s.client_id).required())
-            .field(Field::check("remember", "Remember sign-in on this computer", s.remember_sign_in))
-            .field(Field::multiline("scopes", "Scopes", &s.scopes))
-            .field(Field::check("updates", "Check for updates when starting", s.update_check))
-            .field(Field::info("Stored in", &crate::config::settings_path().display().to_string()))
+        let form = Form::new(&title, &t("dialog.save"))
+            .intro(&t("settings.intro"))
+            .field(Field::text("tenant", &t("settings.tenant"), &s.tenant_id).required())
+            .field(Field::text("client", &t("settings.client"), &s.client_id).required())
+            .field(Field::check("remember", &t("settings.remember"), s.remember_sign_in))
+            .field(Field::multiline("scopes", &t("settings.scopes"), &s.scopes))
+            .field(Field::check("updates", &t("settings.updates"), s.update_check))
+            .field(Field::info(&t("settings.stored_in"), &crate::config::settings_path().display().to_string()))
             .on_submit(|app, f| {
                 let client = f.text("client");
                 if !is_guid(&client) {
-                    return Err("Client ID must be a GUID, for example 00000000-0000-0000-0000-000000000000.".into());
+                    return Err(t("settings.bad_client"));
                 }
                 let tenant = f.text("tenant");
                 if tenant.contains(char::is_whitespace) || tenant.contains('/') {
-                    return Err("Tenant ID must be a GUID or a domain such as contoso.onmicrosoft.com.".into());
+                    return Err(t("settings.bad_tenant"));
                 }
                 let scopes = f.text("scopes").split_whitespace().collect::<Vec<_>>().join(" ");
                 let new = Settings {
@@ -333,24 +325,24 @@ impl App {
 
     fn new_user(&mut self) {
         let domains: Vec<(String, String)> = self.domains.iter().map(|d| (d.clone(), format!("@{d}"))).collect();
-        let mut form = Form::new("New user", "Create")
-            .field(Field::text("displayName", "Display name", "").required())
-            .field(Field::text("alias", "User name", "").required());
+        let mut form = Form::new(&t("user.new_title"), &t("dialog.create"))
+            .field(Field::text("displayName", &t("field.display_name"), "").required())
+            .field(Field::text("alias", &t("field.user_name"), "").required());
         form = if domains.is_empty() {
-            form.field(Field::text("domain", "Domain", ""))
+            form.field(Field::text("domain", &t("field.domain"), ""))
         } else {
-            form.field(Field::choice("domain", "Domain", domains, 0))
+            form.field(Field::choice("domain", &t("field.domain"), domains, 0))
         };
         let form = form
-            .field(Field::text("givenName", "First name", ""))
-            .field(Field::text("surname", "Last name", ""))
-            .field(Field::text("jobTitle", "Job title", ""))
-            .field(Field::text("department", "Department", ""))
-            .field(Field::text("usageLocation", "Usage location", ""))
-            .field(Field::password("password", "Password", &generate_password()))
-            .field(Field::check("force", "Require password change at next sign-in", true))
-            .field(Field::check("enabled", "Account enabled", true))
-            .intro("Usage location is a two-letter country code (e.g. GB) and is required before licences can be assigned.")
+            .field(Field::text("givenName", &t("field.first_name"), ""))
+            .field(Field::text("surname", &t("field.last_name"), ""))
+            .field(Field::text("jobTitle", &t("field.job_title"), ""))
+            .field(Field::text("department", &t("field.department"), ""))
+            .field(Field::text("usageLocation", &t("field.usage_location"), ""))
+            .field(Field::password("password", &t("field.password"), &generate_password()))
+            .field(Field::check("force", &t("field.force_change"), true))
+            .field(Field::check("enabled", &t("field.account_enabled"), true))
+            .intro(&t("user.new_intro"))
             .on_submit(|app, f| {
                 let domain = match f.choice("domain") {
                     d if !d.is_empty() => d,
@@ -358,17 +350,17 @@ impl App {
                 };
                 let alias = f.text("alias");
                 if alias.contains('@') || alias.contains(' ') {
-                    return Err("User name must not contain spaces or @; choose the domain separately.".into());
+                    return Err(t("user.bad_alias"));
                 }
                 if domain.is_empty() {
-                    return Err("Domain is required.".into());
+                    return Err(tf("form.required", &[("field", &t("field.domain"))]));
                 }
                 let password = f.raw("password");
                 if password.len() < 8 {
-                    return Err("Password must be at least 8 characters.".into());
+                    return Err(t("user.short_password"));
                 }
                 if !is_usage_location(&f.text("usageLocation")) {
-                    return Err("Usage location must be a two-letter country code, such as GB.".into());
+                    return Err(t("user.bad_usage_location"));
                 }
                 let mut body = json!({
                     "accountEnabled": f.checked("enabled"),
@@ -386,17 +378,17 @@ impl App {
                         body[key] = json!(if key == "usageLocation" { v.to_uppercase() } else { v });
                     }
                 }
-                app.spawn("Creating user…", move |g| g.post("/users", &body), move |app, r| match r {
+                app.spawn(t("user.creating"), move |g| g.post("/users", &body), move |app, r| match r {
                     Ok(user) => {
                         let upn = s(&user, "userPrincipalName");
                         app.upsert(Node::Users, user);
                         app.push(Dialog::Message {
-                            title: "User created".into(),
-                            text: format!("{upn} was created. Give the user this initial password:"),
+                            title: t("user.created_title"),
+                            text: tf("user.created", &[("upn", &upn)]),
                             copy: Some(password),
                         });
                     }
-                    Err(e) => app.error("New user", e),
+                    Err(e) => app.error(&t("user.new_title"), e),
                 });
                 Ok(())
             });
@@ -404,13 +396,13 @@ impl App {
     }
 
     fn reset_password(&mut self, id: String, name: String) {
-        let form = Form::new(&format!("Reset password — {name}"), "Reset")
-            .field(Field::password("password", "New password", &generate_password()).required())
-            .field(Field::check("force", "Require password change at next sign-in", true))
+        let form = Form::new(&tf("password.title", &[("name", &name)]), &t("password.reset"))
+            .field(Field::password("password", &t("field.new_password"), &generate_password()).required())
+            .field(Field::check("force", &t("field.force_change"), true))
             .on_submit(move |app, f| {
                 let password = f.raw("password");
                 if password.len() < 8 {
-                    return Err("Password must be at least 8 characters.".into());
+                    return Err(t("user.short_password"));
                 }
                 let body = json!({ "passwordProfile": {
                     "password": password,
@@ -418,15 +410,15 @@ impl App {
                 }});
                 let path = format!("/users/{id}");
                 let who = name.clone();
-                app.spawn("Resetting password…", move |g| g.patch(&path, &body), move |app, r| match r {
+                app.spawn(t("password.resetting"), move |g| g.patch(&path, &body), move |app, r| match r {
                     Ok(()) => {
                         app.push(Dialog::Message {
-                            title: "Password reset".into(),
-                            text: format!("The password for {who} was reset to:"),
+                            title: t("password.done_title"),
+                            text: tf("password.done", &[("name", &who)]),
                             copy: Some(password),
                         });
                     }
-                    Err(e) => app.error("Reset password", e),
+                    Err(e) => app.error(&t("password.reset_title"), e),
                 });
                 Ok(())
             });
@@ -437,8 +429,8 @@ impl App {
         let enable = obj["accountEnabled"] == false;
         let id = s(&obj, "id");
         let path = format!("/{}/{id}", collection(node));
-        let verb = if enable { "Enable" } else { "Disable" };
-        let label = format!("{verb} {}", node.object_name(&obj));
+        let name = node.object_name(&obj);
+        let label = tf(if enable { "task.enable" } else { "task.disable" }, &[("name", &name)]);
         let run = move |app: &mut App| {
             app.mutate(&label, move |g| g.patch(&path, &json!({ "accountEnabled": enable })), move |app| {
                 app.upsert(node, json!({ "id": id, "accountEnabled": enable }));
@@ -447,29 +439,27 @@ impl App {
         if enable {
             run(self);
         } else {
-            let what = match node {
-                Node::Users => "The user will be unable to sign in.",
-                Node::Applications => "No one will be able to sign in to it, and it will be unable to get tokens.",
-                _ => "The device will be unable to authenticate with Microsoft Entra ID.",
+            let (title, text) = match node {
+                Node::Users => ("ops.disable_user_title", "ops.disable_user"),
+                Node::Applications => ("ops.disable_application_title", "ops.disable_application"),
+                _ => ("ops.disable_device_title", "ops.disable_device"),
             };
-            let text = format!("Disable {} '{}'? {what}", node.noun(), node.object_name(&obj));
-            self.push(Dialog::confirm(&format!("Disable {}", node.noun()), &text, run));
+            self.push(Dialog::confirm(&t(title), &tf(text, &[("name", &name)]), run));
         }
     }
 
     fn delete_obj(&mut self, node: Node, id: String, name: String) {
-        let note = match node {
-            Node::Users => "Deleted users can be restored for 30 days.",
-            Node::Groups => "Microsoft 365 groups can be restored for 30 days; security groups are deleted permanently.",
-            Node::Devices => "This cannot be undone.",
-            Node::Applications => "It is removed from the tenant with its user and group assignments and the \
-                                   permissions granted to it, so no one will be able to sign in to it.",
-            _ => "",
+        let (title, text) = match node {
+            Node::Users => ("ops.delete_user_title", "ops.delete_user"),
+            Node::Groups => ("ops.delete_group_title", "ops.delete_group"),
+            Node::Devices => ("ops.delete_device_title", "ops.delete_device"),
+            Node::Applications => ("ops.delete_application_title", "ops.delete_application"),
+            _ => return,
         };
-        let text = format!("Are you sure you want to delete the {} '{name}'? {note}", node.noun());
-        self.push(Dialog::confirm(&format!("Delete {}", node.noun()), &text, move |app| {
+        let text = tf(text, &[("name", &name)]);
+        self.push(Dialog::confirm(&t(title), &text, move |app| {
             let path = format!("/{}/{id}", collection(node));
-            app.mutate(&format!("Delete {name}"), move |g| g.delete(&path), move |app| {
+            app.mutate(&tf("task.delete", &[("name", &name)]), move |g| g.delete(&path), move |app| {
                 app.remove_obj(node, &id);
             });
         }));
@@ -479,16 +469,16 @@ impl App {
 
     fn new_group(&mut self) {
         let types = vec![
-            ("security".to_string(), "Security".to_string()),
-            ("m365".to_string(), "Microsoft 365".to_string()),
+            ("security".to_string(), t("value.group_security")),
+            ("m365".to_string(), t("value.group_m365")),
         ];
-        let form = Form::new("New group", "Create")
-            .field(Field::choice("type", "Group type", types, 0))
-            .field(Field::text("displayName", "Name", "").required())
-            .field(Field::text("mailNickname", "Mail nickname", ""))
-            .field(Field::multiline("description", "Description", ""))
-            .field(Field::check("roles", "Microsoft Entra roles can be assigned to this group", false))
-            .intro("Role-assignable groups can only be created by a Privileged Role Administrator or Global Administrator, and the setting cannot be changed later.")
+        let form = Form::new(&t("group.new_title"), &t("dialog.create"))
+            .field(Field::choice("type", &t("field.group_type"), types, 0))
+            .field(Field::text("displayName", &t("field.name"), "").required())
+            .field(Field::text("mailNickname", &t("field.mail_nickname"), ""))
+            .field(Field::multiline("description", &t("field.description"), ""))
+            .field(Field::check("roles", &t("field.role_assignable"), false))
+            .intro(&t("group.new_intro"))
             .on_submit(|app, f| {
                 let m365 = f.choice("type") == "m365";
                 let roles = f.checked("roles");
@@ -498,7 +488,7 @@ impl App {
                     nick = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
                 }
                 if nick.is_empty() {
-                    return Err("Enter a mail nickname using letters and numbers.".into());
+                    return Err(t("group.bad_nickname"));
                 }
                 let mut body = json!({
                     "displayName": name,
@@ -514,12 +504,12 @@ impl App {
                 if roles {
                     body["isAssignableToRole"] = json!(true);
                 }
-                app.spawn("Creating group…", move |g| g.post("/groups", &body), |app, r| match r {
+                app.spawn(t("group.creating"), move |g| g.post("/groups", &body), |app, r| match r {
                     Ok(group) => {
-                        app.status = format!("Created group {}", s(&group, "displayName"));
+                        app.status = tf("group.created", &[("name", &s(&group, "displayName"))]);
                         app.upsert(Node::Groups, group);
                     }
-                    Err(e) => app.error("New group", e),
+                    Err(e) => app.error(&t("group.new_title"), e),
                 });
                 Ok(())
             });
@@ -529,19 +519,19 @@ impl App {
     pub fn add_member(&mut self, group_id: &str, member_id: &str, after: impl FnOnce(&mut App) + Send + 'static) {
         let path = format!("/groups/{group_id}/members/$ref");
         let body = json!({ "@odata.id": format!("{}/v1.0/directoryObjects/{member_id}", self.settings.graph_endpoint) });
-        self.mutate("Add member", move |g| g.post(&path, &body).map(|_| ()), after);
+        self.mutate(&t("task.add_member"), move |g| g.post(&path, &body).map(|_| ()), after);
     }
 
     pub fn add_owner(&mut self, coll: &str, obj_id: &str, user_id: &str, after: impl FnOnce(&mut App) + Send + 'static) {
         let path = format!("/{coll}/{obj_id}/owners/$ref");
         let body = json!({ "@odata.id": format!("{}/v1.0/directoryObjects/{user_id}", self.settings.graph_endpoint) });
-        self.mutate("Add owner", move |g| g.post(&path, &body).map(|_| ()), after);
+        self.mutate(&t("task.add_owner"), move |g| g.post(&path, &body).map(|_| ()), after);
     }
 
     pub fn assign_role(&mut self, principal_id: &str, role_id: &str, after: impl FnOnce(&mut App) + Send + 'static) {
         let body = json!({ "principalId": principal_id, "roleDefinitionId": role_id, "directoryScopeId": "/" });
         self.mutate(
-            "Assign directory role",
+            &t("task.assign_role"),
             move |g| g.post("/roleManagement/directory/roleAssignments", &body).map(|_| ()),
             after,
         );
@@ -555,8 +545,8 @@ impl App {
         } else {
             json!({ "addLicenses": [], "removeLicenses": [sku_id] })
         };
-        let label = if add { "Assign licence" } else { "Remove licence" };
-        self.mutate(label, move |g| g.post(&path, &body).map(|_| ()), after);
+        let label = t(if add { "task.assign_licence" } else { "task.remove_licence" });
+        self.mutate(&label, move |g| g.post(&path, &body).map(|_| ()), after);
     }
 
     /// Assigns a user or group to an application, asking which app role to give them if the
@@ -568,25 +558,22 @@ impl App {
         // Default access is only for applications that define no app roles of their own.
         let own_roles = sp["appRoles"].as_array().is_some_and(|r| r.iter().any(|r| r["isEnabled"] != false));
         if roles.is_empty() && own_roles {
-            self.push(Dialog::message(
-                "Assign users and groups",
-                &format!("{name} has app roles, but none that can be given to users or groups, so they can't be assigned to it."),
-            ));
+            self.push(Dialog::message(&t("ops.assign_app_title"), &tf("ops.no_user_roles", &[("name", &name)])));
             return;
         }
-        self.pick_user_or_group(&format!("Assign user or group to {name}"), move |app, who| {
+        self.pick_user_or_group(&tf("pick.assign_user_or_group_to", &[("name", &name)]), move |app, who| {
             let assign = move |app: &mut App, role_id: String| {
                 let path = format!("/servicePrincipals/{sp_id}/appRoleAssignedTo");
                 let body = json!({ "principalId": who.id, "resourceId": sp_id, "appRoleId": role_id });
-                app.mutate("Assign to application", move |g| g.post(&path, &body).map(|_| ()), after);
+                app.mutate(&t("task.assign_app"), move |g| g.post(&path, &body).map(|_| ()), after);
             };
             match roles.len() {
                 0 => assign(app, DEFAULT_ACCESS_ROLE.into()),
                 1 => assign(app, roles[0].id.clone()),
                 _ => {
-                    let title = format!("Role for {}", who.label.trim_start_matches(['👤', '👥', ' ']));
+                    let title = tf("pick.role_for", &[("name", &who.label.trim_start_matches(['👤', '👥', ' ']))]);
                     let fetch = move |_: &Graph, _: &str| Ok(roles.clone());
-                    app.push(Dialog::Picker(Picker::new(&title, "Role:", false, fetch, move |app, role| assign(app, role.id))));
+                    app.push(Dialog::Picker(Picker::new(&title, &t("pick.role"), false, fetch, move |app, role| assign(app, role.id))));
                 }
             }
         });
@@ -595,11 +582,11 @@ impl App {
     // ----- pickers -------------------------------------------------------
 
     pub fn pick_user(&mut self, title: &str, on_pick: impl FnOnce(&mut App, PickItem) + 'static) {
-        self.push(Dialog::Picker(Picker::new(title, "Name or UPN:", true, search_users, on_pick)));
+        self.push(Dialog::Picker(Picker::new(title, &t("pick.name_or_upn"), true, search_users, on_pick)));
     }
 
     pub fn pick_group(&mut self, title: &str, on_pick: impl FnOnce(&mut App, PickItem) + 'static) {
-        self.push(Dialog::Picker(Picker::new(title, "Group name:", true, search_groups, on_pick)));
+        self.push(Dialog::Picker(Picker::new(title, &t("pick.group_name"), true, search_groups, on_pick)));
     }
 
     pub fn pick_user_or_group(&mut self, title: &str, on_pick: impl FnOnce(&mut App, PickItem) + 'static) {
@@ -608,7 +595,7 @@ impl App {
             items.extend(search_groups(g, q)?);
             Ok(items)
         };
-        self.push(Dialog::Picker(Picker::new(title, "Search:", true, fetch, on_pick)));
+        self.push(Dialog::Picker(Picker::new(title, &t("pick.search"), true, fetch, on_pick)));
     }
 
     /// Users, groups and devices (anything that can be a group member).
@@ -619,7 +606,7 @@ impl App {
             items.extend(search_devices(g, q)?);
             Ok(items)
         };
-        self.push(Dialog::Picker(Picker::new(title, "Search:", true, fetch, on_pick)));
+        self.push(Dialog::Picker(Picker::new(title, &t("pick.search"), true, fetch, on_pick)));
     }
 
     pub fn pick_role(&mut self, title: &str, on_pick: impl FnOnce(&mut App, PickItem) + 'static) {
@@ -632,7 +619,7 @@ impl App {
             roles.sort_by_key(|r| r.label.to_lowercase());
             Ok(roles)
         };
-        self.push(Dialog::Picker(Picker::new(title, "Role:", false, fetch, on_pick)));
+        self.push(Dialog::Picker(Picker::new(title, &t("pick.role"), false, fetch, on_pick)));
     }
 
     pub fn pick_sku(&mut self, title: &str, on_pick: impl FnOnce(&mut App, PickItem) + 'static) {
@@ -647,14 +634,14 @@ impl App {
                     PickItem {
                         id: s(&v, "skuId"),
                         label: sku_name(&part),
-                        detail: format!("{part} · {} of {total} available", total - used),
+                        detail: tf("pick.sku_detail", &[("sku", &part), ("available", &(total - used)), ("total", &total)]),
                     }
                 })
                 .collect();
             skus.sort_by_key(|s| s.label.to_lowercase());
             Ok(skus)
         };
-        self.push(Dialog::Picker(Picker::new(title, "Licence:", false, fetch, on_pick)));
+        self.push(Dialog::Picker(Picker::new(title, &t("pick.licence"), false, fetch, on_pick)));
     }
 }
 

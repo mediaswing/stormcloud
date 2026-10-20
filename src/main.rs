@@ -10,6 +10,8 @@ mod db;
 mod dialogs;
 mod exchange;
 mod graph;
+mod i18n;
+mod language;
 mod logging;
 mod model;
 mod offboarding;
@@ -80,6 +82,7 @@ fn run_gui() -> ExitCode {
         std::env::consts::ARCH,
         config::settings_path().display()
     );
+    i18n::activate_saved(&i18n::languages_dir(), &settings.language);
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Graphical Cloud Management — Microsoft Entra ID")

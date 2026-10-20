@@ -4,6 +4,7 @@
 use crate::app::{App, Bold};
 use crate::dialogs::{Dialog, PickItem};
 use crate::graph::{enc, Graph};
+use crate::i18n::{t, tf};
 use crate::model::{group_type, s, sku_name, Node};
 use crate::ops::generate_password;
 use crate::workflow::{self, Loadable, Shared, State, Step};
@@ -11,7 +12,7 @@ use eframe::egui::{self, RichText};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-const PAGES: [&str; 5] = ["User", "Licences", "Groups", "Review", "Results"];
+const PAGES: [&str; 5] = ["onboard.page_user", "tab.licences", "onboard.page_groups", "onboard.page_review", "wizard.page_results"];
 const REVIEW: usize = 3;
 const RESULTS: usize = 4;
 
@@ -33,6 +34,8 @@ pub struct GroupChoice {
     pub kind: String,
     /// Whether membership can be set here at all.
     pub allowed: bool,
+    /// Its members get directory roles.
+    pub role_assignable: bool,
     pub selected: bool,
     pub note: String,
 }
@@ -71,34 +74,31 @@ pub fn assigns_licences(v: &Value) -> bool {
 }
 
 pub fn classify_group(v: &Value) -> GroupChoice {
+    let role_assignable = v["isAssignableToRole"] == true;
     let (allowed, preselect, mut note) = match managed(v) {
-        Managed::Dynamic => (false, false, "Dynamic membership: set by its rule".to_string()),
-        Managed::Synced => (false, false, "Synced from Active Directory: change it there".into()),
-        Managed::Exchange => {
-            (false, false, "Distribution list or mail-enabled security group: add the user in Exchange Online once they have a mailbox".into())
-        }
-        Managed::Graph if v["isAssignableToRole"] == true => {
-            (true, false, "Role-assignable: its members get directory roles, so it isn't ticked for you".into())
-        }
+        Managed::Dynamic => (false, false, t("onboard.group_dynamic")),
+        Managed::Synced => (false, false, t("onboard.group_synced")),
+        Managed::Exchange => (false, false, t("onboard.group_exchange")),
+        Managed::Graph if role_assignable => (true, false, t("onboard.group_roles")),
         Managed::Graph => (true, true, String::new()),
     };
     if assigns_licences(v) {
-        note = if note.is_empty() { "Assigns licences".into() } else { format!("{note}. Assigns licences") };
+        note = if note.is_empty() { t("onboard.group_licences") } else { format!("{note}. {}", t("onboard.group_licences")) };
     }
-    GroupChoice { id: s(v, "id"), name: s(v, "displayName"), kind: group_type(v), allowed, selected: preselect, note }
+    GroupChoice { id: s(v, "id"), name: s(v, "displayName"), kind: group_type(v), allowed, role_assignable, selected: preselect, note }
 }
 
 /// Why a user name can't be used, if it can't. Entra allows letters, digits and `' . - _ ! # ^ ~`,
 /// not starting or ending with a full stop.
 pub fn alias_problem(alias: &str) -> Option<String> {
     if alias.is_empty() {
-        return Some("Enter a user name.".into());
+        return Some(t("onboard.no_alias"));
     }
     if let Some(c) = alias.chars().find(|c| !(c.is_ascii_alphanumeric() || "'.-_!#^~".contains(*c))) {
-        return Some(format!("The user name can't contain '{c}'. Use letters, digits and ' . - _ ! # ^ ~ only; choose the domain separately."));
+        return Some(tf("onboard.alias_char", &[("char", &c)]));
     }
     if alias.starts_with('.') || alias.ends_with('.') || alias.contains("..") {
-        return Some("The user name can't start or end with a full stop, or have two in a row.".into());
+        return Some(t("onboard.alias_dots"));
     }
     None
 }
@@ -114,9 +114,9 @@ pub fn password_problem(p: &str) -> Option<String> {
         p.chars().any(|c| !c.is_ascii_alphanumeric()),
     ];
     if !(8..=256).contains(&n) {
-        Some("The password must be 8 to 256 characters.".into())
+        Some(t("onboard.password_length"))
     } else if classes.iter().filter(|c| **c).count() < 3 {
-        Some("The password needs three of: upper case letters, lower case letters, digits and symbols.".into())
+        Some(t("onboard.password_classes"))
     } else {
         None
     }
@@ -142,10 +142,10 @@ pub enum Planned {
 impl Planned {
     pub fn label(&self, upn: &str) -> String {
         match self {
-            Planned::Create(_) => format!("Create the user {upn}"),
-            Planned::Manager { name, .. } => format!("Set their manager to {name}"),
-            Planned::Licence { name, .. } => format!("Assign the licence {name}"),
-            Planned::Group { name, .. } => format!("Add them to the group {name}"),
+            Planned::Create(_) => tf("onboard.step_create", &[("upn", &upn)]),
+            Planned::Manager { name, .. } => tf("onboard.step_manager", &[("name", name)]),
+            Planned::Licence { name, .. } => tf("onboard.step_licence", &[("name", name)]),
+            Planned::Group { name, .. } => tf("onboard.step_group", &[("name", name)]),
         }
     }
 }
@@ -207,13 +207,13 @@ impl Onboarding {
     fn user_problem(&self) -> Option<String> {
         let usage = self.usage_location.trim();
         if self.display_name.trim().is_empty() {
-            Some("Enter a display name.".into())
+            Some(t("onboard.no_display_name"))
         } else if let Some(p) = alias_problem(self.alias.trim()) {
             Some(p)
         } else if self.domain().is_empty() || self.domain().contains(['@', ' ']) {
-            Some("Choose or enter the domain.".into())
+            Some(t("onboard.no_domain"))
         } else if !crate::ops::is_usage_location(usage) {
-            Some("The usage location is a two-letter country code, such as GB or US.".into())
+            Some(t("onboard.bad_usage_location"))
         } else {
             password_problem(&self.password)
         }
@@ -262,18 +262,18 @@ impl Onboarding {
     fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
         match &self.upn_check {
-            Some(UpnCheck::Taken) => out.push(format!("A user or object named {} already exists. Go back and choose another user name.", self.upn())),
-            Some(UpnCheck::Unknown(e)) => out.push(format!("Could not check whether {} is free: {e}", self.upn())),
+            Some(UpnCheck::Taken) => out.push(tf("onboard.upn_taken", &[("upn", &self.upn())])),
+            Some(UpnCheck::Unknown(e)) => out.push(tf("onboard.upn_unknown", &[("upn", &self.upn()), ("error", e)])),
             _ => {}
         }
         if self.selected_skus().is_empty() {
-            out.push("No licence is assigned, so the user won't get a mailbox or Microsoft 365 apps until one is.".into());
+            out.push(t("onboard.no_licence"));
         }
-        if self.groups.iter().any(|g| g.selected && g.note.starts_with("Role-assignable")) {
-            out.push("A role-assignable group is ticked: the user will get the directory roles assigned to it.".into());
+        if self.groups.iter().any(|g| g.selected && g.role_assignable) {
+            out.push(t("onboard.role_group_ticked"));
         }
         if !self.force_change {
-            out.push("The user won't be asked to change the initial password when they first sign in.".into());
+            out.push(t("onboard.no_force_change"));
         }
         out
     }
@@ -306,23 +306,23 @@ fn step(planned: Planned, upn: &str) -> Step<Graph, Ctx> {
         match planned {
             Planned::Create(body) => {
                 ctx.user = g.post("/users", &body)?;
-                Ok(format!("Created with object ID {}", s(&ctx.user, "id")))
+                Ok(tf("onboard.created", &[("id", &s(&ctx.user, "id"))]))
             }
             Planned::Manager { id, .. } => {
                 let body = json!({ "@odata.id": g.object_url("users", &id) });
                 retry_while_new(|| g.put(&format!("/users/{user_id}/manager/$ref"), &body))?;
-                Ok("Manager set".into())
+                Ok(t("onboard.manager_set"))
             }
             Planned::Licence { id, .. } => {
                 let body = json!({ "addLicenses": [{ "skuId": id, "disabledPlans": [] }], "removeLicenses": [] });
                 retry_while_new(|| g.post(&format!("/users/{user_id}/assignLicense"), &body))?;
-                Ok("Licence assigned".into())
+                Ok(t("onboard.licence_assigned"))
             }
             Planned::Group { id, .. } => {
                 let body = json!({ "@odata.id": g.object_url("directoryObjects", &user_id) });
                 match retry_while_new(|| g.post(&format!("/groups/{id}/members/$ref"), &body)) {
-                    Ok(_) => Ok("Added".into()),
-                    Err(e) if e.to_string().contains("already exist") => Ok("Already a member".into()),
+                    Ok(_) => Ok(t("bulk.added")),
+                    Err(e) if e.to_string().contains("already exist") => Ok(t("bulk.already_member")),
                     Err(e) => Err(e),
                 }
             }
@@ -359,7 +359,7 @@ impl App {
         };
         let id = self.push(Dialog::Onboard(Box::new(wizard)));
         self.spawn(
-            "Loading licences…",
+            tf("status.loading_list", &[("list", &Node::Licences.list_name())]),
             |g| g.list("/subscribedSkus"),
             move |app, r| {
                 let Some(Dialog::Onboard(w)) = app.dialog_mut(id) else { return };
@@ -402,9 +402,9 @@ impl App {
     }
 
     fn onboarding_pick_group(&mut self, id: u64) {
-        self.pick_group("Add the new user to a group", move |app, g| {
+        self.pick_group(&t("onboard.pick_group"), move |app, g| {
             let path = format!("/groups/{}?$select={GROUP_SELECT}", g.id);
-            app.spawn("Reading group…", move |gr| gr.get(&path), move |app, r| match r {
+            app.spawn(t("onboard.reading_group"), move |gr| gr.get(&path), move |app, r| match r {
                 Ok(v) => {
                     app.add_onboarding_groups(id, vec![v.clone()]);
                     // Ticked by hand, so tick it even if copying wouldn't, as long as it can be set.
@@ -414,20 +414,21 @@ impl App {
                         c.selected = c.allowed;
                     }
                 }
-                Err(e) => app.error("Add group", e),
+                Err(e) => app.error(&t("onboard.add_group_title"), e),
             });
         });
     }
 
     fn onboarding_copy_groups(&mut self, id: u64) {
-        self.pick_user("Copy group memberships from", move |app, u| {
+        self.pick_user(&t("onboard.copy_from"), move |app, u| {
             let name = u.label.trim_start_matches(['👤', ' ']).to_string();
             let path = format!("/users/{}/memberOf/microsoft.graph.group?$select={GROUP_SELECT}&$top=999", u.id);
             app.defer(move |app| {
+                let busy = tf("onboard.reading_groups_of", &[("name", &name)]);
                 if let Some(Dialog::Onboard(w)) = app.dialog_mut(id) {
-                    w.busy = Some(format!("Reading {name}'s groups…"));
+                    w.busy = Some(busy.clone());
                 }
-                app.spawn("Reading groups…", move |g| g.list(&path), move |app, r| {
+                app.spawn(busy, move |g| g.list(&path), move |app, r| {
                     if let Some(Dialog::Onboard(w)) = app.dialog_mut(id) {
                         w.busy = None;
                     }
@@ -435,9 +436,9 @@ impl App {
                         Ok(found) => {
                             let n = found.len();
                             app.add_onboarding_groups(id, found);
-                            app.status = format!("Copied {n} group memberships from {name}");
+                            app.status = tf("onboard.copied_groups", &[("count", &n), ("name", &name)]);
                         }
-                        Err(e) => app.error("Copy group memberships", e),
+                        Err(e) => app.error(&t("onboard.copy_groups_title"), e),
                     }
                 });
             });
@@ -446,7 +447,7 @@ impl App {
 
     fn onboarding_check_upn(&mut self, id: u64, upn: String) {
         let path = format!("/users/{}?$select=id", enc(&upn));
-        self.spawn("Checking the user name…", move |g| Ok(g.get(&path)), move |app, r: anyhow::Result<anyhow::Result<Value>>| {
+        self.spawn(t("onboard.checking_upn"), move |g| Ok(g.get(&path)), move |app, r: anyhow::Result<anyhow::Result<Value>>| {
             let Some(Dialog::Onboard(w)) = app.dialog_mut(id) else { return };
             if w.upn() != upn {
                 return;
@@ -462,7 +463,7 @@ impl App {
     fn start_onboarding(&mut self, w: &mut Onboarding) {
         let upn = w.upn();
         let steps: Vec<Step<Graph, Ctx>> = w.plan().into_iter().map(|p| step(p, &upn)).collect();
-        let progress = self.run_workflow(&format!("Onboard {upn}"), Ctx::default(), steps, |app, ctx, _| {
+        let progress = self.run_workflow(&tf("onboard.task", &[("upn", &upn)]), Ctx::default(), steps, |app, ctx, _| {
             if ctx.user.is_object() {
                 app.upsert(Node::Users, ctx.user);
             }
@@ -482,7 +483,7 @@ impl App {
         let mut copy_groups = false;
         modal.show(ctx, |ui| {
             ui.set_width(720.0);
-            workflow::page_heading(ui, "Onboard a new user", &PAGES, w.page);
+            workflow::page_heading(ui, &t("onboard.title"), &PAGES, w.page);
             egui::ScrollArea::vertical().max_height(400.0).auto_shrink([false, true]).show(ui, |ui| match w.page {
                 0 => {
                     egui::Grid::new(("onboard-user", id)).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -495,14 +496,14 @@ impl App {
                             ui.end_row();
                             r.changed()
                         };
-                        let names = text(ui, "First name", &mut w.given_name, first) | text(ui, "Last name", &mut w.surname, false);
+                        let names = text(ui, &t("field.first_name"), &mut w.given_name, first) | text(ui, &t("field.last_name"), &mut w.surname, false);
                         if names && w.auto_name {
                             w.display_name = format!("{} {}", w.given_name.trim(), w.surname.trim()).trim().to_string();
                         }
-                        if text(ui, "Display name*", &mut w.display_name, false) {
+                        if text(ui, &format!("{}*", t("field.display_name")), &mut w.display_name, false) {
                             w.auto_name = false;
                         }
-                        let l = ui.label("User name*");
+                        let l = ui.label(format!("{}*", t("field.user_name")));
                         ui.horizontal(|ui| {
                             ui.add(egui::TextEdit::singleline(&mut w.alias).desired_width(170.0)).labelled_by(l.id);
                             if w.domains.is_empty() {
@@ -520,35 +521,35 @@ impl App {
                             }
                         });
                         ui.end_row();
-                        text(ui, "Job title", &mut w.job_title, false);
-                        text(ui, "Department", &mut w.department, false);
-                        text(ui, "Usage location", &mut w.usage_location, false);
+                        text(ui, &t("field.job_title"), &mut w.job_title, false);
+                        text(ui, &t("field.department"), &mut w.department, false);
+                        text(ui, &t("field.usage_location"), &mut w.usage_location, false);
                         ui.label("");
-                        ui.label(RichText::new("A two-letter country code such as GB, needed before licences can be assigned.").small().weak());
+                        ui.label(RichText::new(t("onboard.usage_location_note")).small().weak());
                         ui.end_row();
-                        ui.label("Manager");
+                        ui.label(t("onboard.manager"));
                         ui.horizontal(|ui| {
                             match &w.manager {
                                 Some(m) => ui.label(format!("{}  ({})", m.label.trim_start_matches(['👤', ' ']), m.detail)),
-                                None => ui.label(RichText::new("None").weak()),
+                                None => ui.label(RichText::new(t("onboard.none")).weak()),
                             };
-                            pick_manager = ui.button("Choose…").clicked();
-                            if w.manager.is_some() && ui.button("Clear").clicked() {
+                            pick_manager = ui.button(t("onboard.choose")).clicked();
+                            if w.manager.is_some() && ui.button(t("onboard.clear")).clicked() {
                                 w.manager = None;
                             }
                         });
                         ui.end_row();
-                        let l = ui.label("Initial password*");
+                        let l = ui.label(format!("{}*", t("onboard.initial_password")));
                         ui.horizontal(|ui| {
                             ui.add(egui::TextEdit::singleline(&mut w.password).password(!w.show_password).desired_width(200.0)).labelled_by(l.id);
-                            ui.checkbox(&mut w.show_password, "Show");
-                            if ui.button("Generate").on_hover_text("Make a new random password").clicked() {
+                            ui.checkbox(&mut w.show_password, t("onboard.show"));
+                            if ui.button(t("onboard.generate")).on_hover_text(t("onboard.generate_tip")).clicked() {
                                 w.password = generate_password();
                             }
                         });
                         ui.end_row();
                         ui.label("");
-                        ui.checkbox(&mut w.force_change, "Require a password change at first sign-in");
+                        ui.checkbox(&mut w.force_change, t("onboard.force_change"));
                         ui.end_row();
                     });
                 }
@@ -556,21 +557,21 @@ impl App {
                     Loadable::Loading => {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Loading licences…");
+                            ui.label(tf("status.loading_list", &[("list", &Node::Licences.list_name())]));
                         });
                     }
                     Loadable::Failed(e) => {
-                        ui.colored_label(ui.visuals().error_fg_color, format!("⚠ Could not load the licences: {e}"));
-                        ui.label("You can go on without assigning any, and assign them later.");
+                        ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {}", tf("onboard.licences_failed", &[("error", e)])));
+                        ui.label(t("onboard.licences_later"));
                     }
                     Loadable::Ready(skus) if skus.is_empty() => {
-                        ui.label("The tenant has no licences for users.");
+                        ui.label(t("onboard.no_licences"));
                     }
                     Loadable::Ready(skus) => {
-                        ui.label("Tick the licences to assign. Each is assigned with all its services.");
+                        ui.label(t("onboard.licences_intro"));
                         ui.add_space(4.0);
                         for (i, sku) in skus.iter_mut().enumerate() {
-                            let label = format!("{}  —  {} · {} available", sku.name, sku.part, sku.available.max(0));
+                            let label = format!("{}  —  {}", sku.name, tf("onboard.sku_available", &[("sku", &sku.part), ("count", &sku.available.max(0))]));
                             let r = ui.add_enabled(sku.available > 0 || sku.selected, egui::Checkbox::new(&mut sku.selected, label));
                             if first && i == 0 {
                                 r.request_focus();
@@ -579,18 +580,15 @@ impl App {
                     }
                 },
                 2 => {
-                    ui.label(
-                        "Choose the groups to add the user to, or copy them from a user in a similar role. Groups whose \
-                         membership is set elsewhere are listed but can't be ticked.",
-                    );
+                    ui.label(t("onboard.groups_intro"));
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        let add = ui.button("Add group…");
+                        let add = ui.button(t("onboard.add_group"));
                         if first {
                             add.request_focus();
                         }
                         pick_group = add.clicked();
-                        copy_groups = ui.button("Copy from user…").clicked();
+                        copy_groups = ui.button(t("onboard.copy_from_user")).clicked();
                         if let Some(b) = &w.busy {
                             ui.spinner();
                             ui.label(b.as_str());
@@ -598,7 +596,7 @@ impl App {
                     });
                     ui.add_space(4.0);
                     if w.groups.is_empty() {
-                        ui.label(RichText::new("No groups chosen.").weak());
+                        ui.label(RichText::new(t("onboard.no_groups")).weak());
                     }
                     for g in &mut w.groups {
                         ui.horizontal(|ui| {
@@ -614,22 +612,22 @@ impl App {
                         let usage = w.usage_location.trim().to_uppercase();
                         let manager = w.manager.as_ref().map(|m| m.label.trim_start_matches(['👤', ' ']).to_string()).unwrap_or_default();
                         let rows = [
-                            ("Display name", w.display_name.trim().to_string()),
-                            ("User principal name", w.upn()),
-                            ("Job title", w.job_title.trim().to_string()),
-                            ("Department", w.department.trim().to_string()),
-                            ("Usage location", usage),
-                            ("Manager", manager),
-                            ("Password change at first sign-in", if w.force_change { "Required".into() } else { "Not required".into() }),
+                            ("prop.display_name", w.display_name.trim().to_string()),
+                            ("prop.upn", w.upn()),
+                            ("prop.job_title", w.job_title.trim().to_string()),
+                            ("prop.department", w.department.trim().to_string()),
+                            ("prop.usage_location", usage),
+                            ("onboard.manager", manager),
+                            ("onboard.password_change", t(if w.force_change { "onboard.required" } else { "onboard.not_required" })),
                         ];
                         for (k, v) in rows {
-                            ui.label(RichText::new(k).bold());
+                            ui.label(RichText::new(t(k)).bold());
                             ui.label(if v.is_empty() { "—".to_string() } else { v });
                             ui.end_row();
                         }
                     });
                     ui.add_space(6.0);
-                    ui.label(RichText::new("These steps will run, in this order:").bold());
+                    ui.label(RichText::new(t("onboard.steps_intro")).bold());
                     let upn = w.upn();
                     for (i, p) in w.plan().iter().enumerate() {
                         ui.label(format!("{}. {}", i + 1, p.label(&upn)));
@@ -639,11 +637,11 @@ impl App {
                         Some(UpnCheck::Checking) | None => {
                             ui.horizontal(|ui| {
                                 ui.spinner();
-                                ui.label("Checking the user name is free…");
+                                ui.label(t("onboard.checking_free"));
                             });
                         }
                         Some(UpnCheck::Free) => {
-                            ui.label(format!("✔ {upn} is free."));
+                            ui.label(format!("✔ {}", tf("onboard.upn_free", &[("upn", &upn)])));
                         }
                         _ => {}
                     }
@@ -657,11 +655,11 @@ impl App {
                         workflow::progress_ui(ui, id, &p);
                         if p.finished && matches!(p.steps.first().map(|s| &s.state), Some(State::Done(_))) {
                             ui.add_space(6.0);
-                            ui.label(format!("Give {} this initial password in a secure way. It isn't saved in the report.", w.upn()));
+                            ui.label(tf("onboard.give_password", &[("upn", &w.upn())]));
                             ui.horizontal(|ui| {
                                 let mut shown = w.password.clone();
                                 ui.add(egui::TextEdit::singleline(&mut shown).font(egui::TextStyle::Monospace).desired_width(240.0));
-                                if ui.button("Copy password").clicked() {
+                                if ui.button(t("onboard.copy_password")).clicked() {
                                     ui.ctx().copy_text(w.password.clone());
                                 }
                             });
@@ -676,20 +674,21 @@ impl App {
             ui.separator();
             if w.page == RESULTS {
                 if let Some(p) = w.progress.clone() {
-                    close |= workflow::report_buttons(self, ui, &format!("Onboarding {}", w.upn()), "onboarding report.csv", &p);
+                    let file = format!("{}.csv", t("onboard.report_file"));
+                    close |= workflow::report_buttons(self, ui, &tf("onboard.report_title", &[("upn", &w.upn())]), &file, &p);
                 }
                 return;
             }
             ui.horizontal(|ui| {
-                if w.page > 0 && ui.button("  Back  ").clicked() {
+                if w.page > 0 && ui.button(format!("  {}  ", t("wizard.back"))).clicked() {
                     back = true;
                 }
                 let blocked = w.page == REVIEW && !matches!(w.upn_check, Some(UpnCheck::Free | UpnCheck::Unknown(_)));
-                let label = if w.page == REVIEW { "  Create user  " } else { "  Next  " };
-                if ui.add_enabled(!blocked, egui::Button::new(label)).clicked() {
+                let label = t(if w.page == REVIEW { "onboard.create" } else { "wizard.next" });
+                if ui.add_enabled(!blocked, egui::Button::new(format!("  {label}  "))).clicked() {
                     next = true;
                 }
-                close |= ui.button("Cancel").clicked();
+                close |= ui.button(t("dialog.cancel")).clicked();
             });
         });
         if back {
@@ -700,7 +699,7 @@ impl App {
             w.error = match w.page {
                 0 => w.user_problem(),
                 1 if !w.selected_skus().is_empty() && w.usage_location.trim().is_empty() => {
-                    Some("Licences can only be assigned to a user with a usage location. Go back and enter one.".into())
+                    Some(t("onboard.licence_needs_location"))
                 }
                 _ => None,
             };
@@ -720,7 +719,7 @@ impl App {
             }
         }
         if pick_manager {
-            self.pick_user("Manager of the new user", move |app, u| {
+            self.pick_user(&t("onboard.pick_manager"), move |app, u| {
                 app.defer(move |app| {
                     if let Some(Dialog::Onboard(w)) = app.dialog_mut(id) {
                         w.manager = Some(u);
