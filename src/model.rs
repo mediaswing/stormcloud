@@ -10,6 +10,7 @@ pub enum Node {
     Groups,
     Devices,
     Applications,
+    RemoteServers,
     Exchange,
     Mailboxes,
     DistributionLists,
@@ -32,6 +33,7 @@ pub const TREE: &[(Node, usize)] = &[
     (Node::Groups, 1),
     (Node::Devices, 1),
     (Node::Applications, 1),
+    (Node::RemoteServers, 1),
     (Node::Licences, 1),
     (Node::Exchange, 1),
     (Node::Mailboxes, 2),
@@ -53,6 +55,7 @@ impl Node {
             Node::Groups => "node.groups",
             Node::Devices => "node.devices",
             Node::Applications => "node.applications",
+            Node::RemoteServers => "node.remote_servers",
             Node::Exchange => "node.exchange",
             Node::Mailboxes => "node.mailboxes",
             Node::DistributionLists => "node.distribution_lists",
@@ -68,6 +71,7 @@ impl Node {
             Node::Groups => "node.groups_list",
             Node::Devices => "node.devices_list",
             Node::Applications => "node.applications_list",
+            Node::RemoteServers => "node.remote_servers_list",
             Node::Mailboxes => "node.mailboxes_list",
             Node::DistributionLists => "node.distribution_lists_list",
             Node::Licences => "node.licences_list",
@@ -82,6 +86,7 @@ impl Node {
             Node::Groups => "👥",
             Node::Devices => "💻",
             Node::Applications => "🧩",
+            Node::RemoteServers => "🖥",
             Node::Exchange => "📧",
             Node::Mailboxes => "📬",
             Node::DistributionLists => "📨",
@@ -101,6 +106,11 @@ impl Node {
         matches!(self, Node::Root | Node::Exchange)
     }
 
+    /// Whether the node lists objects, rather than the nodes under it.
+    pub fn is_list(self) -> bool {
+        self.endpoint().is_some() || self == Node::RemoteServers
+    }
+
     pub fn endpoint(self) -> Option<Source> {
         Some(Source::Graph(match self {
             Node::Users => "/users?$select=id,displayName,userPrincipalName,mail,accountEnabled,userType,jobTitle,department,usageLocation,createdDateTime,assignedLicenses&$top=999",
@@ -109,7 +119,8 @@ impl Node {
             Node::Applications => "/servicePrincipals?$select=id,appId,displayName,publisherName,appOwnerOrganizationId,servicePrincipalType,accountEnabled,appRoleAssignmentRequired,tags,appRoles,homepage&$top=999",
             Node::Licences => "/subscribedSkus",
             Node::Mailboxes | Node::DistributionLists => return Some(Source::Exchange),
-            Node::Root | Node::Exchange => return None,
+            // Remote Servers come from `servers.json` (see `servers`), not from Microsoft.
+            Node::Root | Node::Exchange | Node::RemoteServers => return None,
         }))
     }
 
@@ -152,6 +163,18 @@ impl Node {
                 c("col.assignment_required", 130.0, |v| yes_no(&v["appRoleAssignmentRequired"])),
                 c("col.visible_to_users", 110.0, |v| yes_no(&visible_to_users(v))),
                 c("col.application_id", 280.0, |v| s(v, "appId")),
+            ],
+            Node::RemoteServers => vec![
+                c("col.name", 180.0, |v| s(v, "name")),
+                c("col.host", 180.0, |v| s(v, "host")),
+                c("col.os", 190.0, crate::servers::os),
+                c("col.kernel", 170.0, crate::servers::kernel),
+                c("col.installed_apps", 90.0, crate::servers::package_count),
+                c("col.running_services", 90.0, crate::servers::service_count),
+                c("col.pending_updates", 130.0, crate::servers::patch_level),
+                c("col.reboot_required", 90.0, crate::servers::reboot_required),
+                c("col.last_checked", 130.0, crate::servers::last_checked),
+                c("col.status", 200.0, crate::servers::status),
             ],
             Node::Licences => vec![
                 c("col.product", 260.0, |v| sku_name(&s(v, "skuPartNumber"))),
@@ -203,7 +226,7 @@ impl Node {
     pub fn object_name(self, v: &Value) -> String {
         match self {
             Node::Licences => sku_name(&s(v, "skuPartNumber")),
-            Node::Root | Node::Exchange => s(v, "name"),
+            Node::Root | Node::Exchange | Node::RemoteServers => s(v, "name"),
             Node::Mailboxes | Node::DistributionLists => s(v, "DisplayName"),
             _ => s(v, "displayName"),
         }

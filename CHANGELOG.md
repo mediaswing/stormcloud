@@ -4,6 +4,17 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Remote Servers:** a new node below Applications lists Linux servers you keep watch over by
+  SSH, signing in with a password or an SSH key. For each server it shows the operating system
+  and kernel, installed applications, running services, pending and security updates, and whether
+  a restart is needed. Passwords and passphrases are asked for once a session and never saved,
+  and host keys are checked against `~/.ssh/known_hosts` or confirmed the first time.
+- The Windows release now includes an installer for Windows on Arm (arm64).
+
 ## [1.4.0] - 2026-10-20
 
 Adds translating the app into about 30 languages.
@@ -124,6 +135,7 @@ that talks to Microsoft Graph directly.
 - Installers: a Windows MSI that installs without administrator rights, an Ubuntu/Debian .deb
   (Ubuntu 22.04 and later), and a macOS .pkg for Apple Silicon (macOS 11 and later).
 
+[Unreleased]: https://github.com/mediaswing/stormcloud/compare/v1.4.0...HEAD
 [1.4.0]: https://github.com/mediaswing/stormcloud/releases/tag/v1.4.0
 [1.3.0]: https://github.com/mediaswing/stormcloud/releases/tag/v1.3.0
 [1.2.0]: https://github.com/mediaswing/stormcloud/releases/tag/v1.2.0

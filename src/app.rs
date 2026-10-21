@@ -83,6 +83,8 @@ pub struct App {
     pub status: String,
     /// Translating the interface (see `language`).
     pub translation: Option<Arc<crate::language::Job>>,
+    /// Remote Servers' passwords and key passphrases, by server ID, kept only while the app runs.
+    pub ssh_secrets: HashMap<String, String>,
     quit: bool,
 }
 
@@ -169,8 +171,10 @@ impl App {
             busy: 0,
             status: t("status.ready"),
             translation: None,
+            ssh_secrets: HashMap::new(),
             quit: false,
         };
+        app.data.insert(Node::RemoteServers, crate::servers::load_rows());
         app.language_changed();
         if app.settings.is_complete() {
             app.connect();
@@ -299,7 +303,26 @@ impl App {
         });
     }
 
-    /// Runs `work` with only the auth handle (used for sign-in, which has no token yet).
+    /// Runs `work` on a background thread without Graph, showing it in the status bar as
+    /// [`App::spawn`] does, and applies `done` on the UI thread.
+    pub fn spawn_offline<T: Send + 'static>(
+        &mut self,
+        label: impl Into<String>,
+        work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+        done: impl FnOnce(&mut App, anyhow::Result<T>) + Send + 'static,
+    ) {
+        self.busy += 1;
+        self.status = label.into();
+        log::debug!("Task started: {}", self.status);
+        self.spawn_plain(work, move |app, result| {
+            app.busy -= 1;
+            if app.busy == 0 {
+                app.status = t("status.ready");
+            }
+            done(app, result);
+        });
+    }
+
     /// Runs `work` on a background thread without Graph, applying `done` on the UI thread.
     pub fn spawn_plain<T: Send + 'static>(
         &mut self,
@@ -598,7 +621,9 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
-        if self.node.endpoint().is_some() {
+        if self.node == Node::RemoteServers {
+            self.check_all_servers();
+        } else if self.node.endpoint().is_some() {
             self.load(self.node);
         }
     }
@@ -846,7 +871,8 @@ impl App {
         if act.needs_selection() && self.selected().is_none() {
             return false;
         }
-        act == Act::Open || act == Act::Refresh && self.node.endpoint().is_some() || self.signed_in
+        // Remote Servers have nothing to do with the Microsoft sign-in.
+        act == Act::Open || act == Act::Refresh && self.node.endpoint().is_some() || self.signed_in || self.node == Node::RemoteServers
     }
 
     // ----- panels ---------------------------------------------------------
@@ -887,7 +913,8 @@ impl App {
                     }
                 });
                 ui.menu_button(t("menu.view"), |ui| {
-                    if ui.add_enabled(self.signed_in, egui::Button::new(t("act.refresh")).shortcut_text("F5")).clicked() {
+                    let can_refresh = self.signed_in || self.node == Node::RemoteServers;
+                    if ui.add_enabled(can_refresh, egui::Button::new(t("act.refresh")).shortcut_text("F5")).clicked() {
                         self.refresh();
                     }
                     if ui.add(egui::Button::new(t("menu.filter")).shortcut_text(ui.ctx().format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F)))).clicked() {
@@ -987,7 +1014,7 @@ impl App {
                         ui.label(t("status.not_signed_in"));
                     }
                     ui.separator();
-                    if self.node.endpoint().is_some() {
+                    if self.node.is_list() {
                         let total = self.data.get(&self.node).map_or(0, Vec::len);
                         if self.view.len() == total {
                             ui.label(tf("status.count", &[("count", &total), ("list", &self.node.list_name())]));
@@ -1371,7 +1398,7 @@ impl App {
         }
         if let Some(p) = open {
             self.sel = Some(p);
-            self.run_act(if self.node.endpoint().is_some() { Act::Properties } else { Act::Open });
+            self.run_act(if self.node.is_list() { Act::Properties } else { Act::Open });
         }
         if let Some(act) = menu_act {
             self.run_act(act);
@@ -1386,7 +1413,7 @@ impl App {
             Some(Key::Home) => self.set_sel(0),
             Some(Key::End) => self.set_sel(usize::MAX),
             Some(Key::Enter) => {
-                self.run_act(if self.node.endpoint().is_some() { Act::Properties } else { Act::Open })
+                self.run_act(if self.node.is_list() { Act::Properties } else { Act::Open })
             }
             _ => {}
         }
@@ -1446,6 +1473,7 @@ fn child_rows(node: Node) -> Vec<Value> {
         Node::Groups => t("node.groups_about"),
         Node::Devices => t("node.devices_about"),
         Node::Applications => t("node.applications_about"),
+        Node::RemoteServers => t("node.remote_servers_about"),
         Node::Exchange => t("node.exchange_about"),
         Node::Mailboxes => t("node.mailboxes_about"),
         Node::DistributionLists => t("node.distribution_lists_about"),

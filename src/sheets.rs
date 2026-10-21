@@ -1,4 +1,5 @@
-//! Tabbed property sheets for users, groups, devices, applications, Exchange recipients and licences.
+//! Tabbed property sheets for users, groups, devices, applications, Exchange recipients, licences
+//! and remote servers.
 
 use crate::app::App;
 use crate::dialogs::{Dialog, Field, Form};
@@ -33,6 +34,9 @@ pub enum TabKind {
     Security,
     AuthMethods,
     SignIns,
+    Software,
+    Services,
+    Updates,
 }
 
 impl TabKind {
@@ -55,6 +59,9 @@ impl TabKind {
             TabKind::Security => "tab.security",
             TabKind::AuthMethods => "tab.auth_methods",
             TabKind::SignIns => "tab.sign_ins",
+            TabKind::Software => "tab.installed_apps",
+            TabKind::Services => "tab.running_services",
+            TabKind::Updates => "tab.updates",
         })
     }
 }
@@ -69,6 +76,7 @@ fn tabs_for(node: Node) -> Vec<TabKind> {
         Node::Licences => vec![General, ServicePlans, LicensedUsers],
         Node::Mailboxes => vec![General, MailboxAccess, AutoReplies],
         Node::DistributionLists => vec![General, ListMembers],
+        Node::RemoteServers => vec![General, Software, Services, Updates],
         Node::Root | Node::Exchange => vec![General],
     }
 }
@@ -121,6 +129,14 @@ impl Sheet {
         Sheet { node, obj, tabs, active: 0 }
     }
 
+    /// Shows `obj` in place of the object the sheet was opened on, reloading every tab.
+    pub fn replace_obj(&mut self, obj: Value) {
+        self.obj = obj;
+        for tab in &mut self.tabs {
+            tab.requested = false;
+        }
+    }
+
     /// Opens the sheet on the tab of `kind`, if it has one.
     pub fn on_tab(mut self, kind: TabKind) -> Sheet {
         if let Some(i) = self.tabs.iter().position(|t| t.kind == kind) {
@@ -136,7 +152,7 @@ impl Sheet {
     /// The keys of the labels for the add / remove / edit operations available on a tab.
     fn op_labels(&self, kind: TabKind) -> [Option<&'static str>; 3] {
         use TabKind::*;
-        let editable = matches!(self.node, Node::Users | Node::Groups | Node::Applications | Node::Mailboxes | Node::DistributionLists);
+        let editable = matches!(self.node, Node::Users | Node::Groups | Node::Applications | Node::Mailboxes | Node::DistributionLists | Node::RemoteServers);
         match (self.node, kind) {
             (Node::Users, Security | AuthMethods | SignIns) => crate::security::op_labels(kind),
             (_, General) if editable => [None, None, Some("sheet.edit")],
@@ -471,10 +487,20 @@ impl App {
         let kind = sheet.tabs[sheet.active].kind;
         if !sheet.tabs[sheet.active].requested {
             sheet.tabs[sheet.active].requested = true;
-            if !matches!(sheet.tabs[sheet.active].body, TabBody::Table { .. } | TabBody::Fields(_)) {
-                sheet.tabs[sheet.active].body = TabBody::Loading;
+            if sheet.node == Node::RemoteServers {
+                // A server's tabs come from its last check, already in hand.
+                let tab = &mut sheet.tabs[sheet.active];
+                tab.body = crate::servers::tab_body(kind, &sheet.obj);
+                tab.sel = match &tab.body {
+                    TabBody::Table { rows, .. } if !rows.is_empty() => Some(tab.sel.unwrap_or(0).min(rows.len() - 1)),
+                    _ => None,
+                };
+            } else {
+                if !matches!(sheet.tabs[sheet.active].body, TabBody::Table { .. } | TabBody::Fields(_)) {
+                    sheet.tabs[sheet.active].body = TabBody::Loading;
+                }
+                self.start_tab_load(sheet_id, sheet.node, kind, sheet.obj.clone());
             }
-            self.start_tab_load(sheet_id, sheet.node, kind, sheet.obj.clone());
         }
 
         let labels = sheet.op_labels(kind);
@@ -640,6 +666,15 @@ impl App {
             (TabBody::Table { rows, .. }, Some(i)) => rows.get(i).map(|r| (Some(r.data.clone()), r.cells.clone())).unwrap_or_default(),
             _ => (None, Vec::new()),
         };
+        if node == Node::RemoteServers {
+            // Refresh checks the server again; Edit changes how it is reached.
+            match op {
+                TabOp::Reload => self.check_server(&s(&sheet.obj, "id")),
+                TabOp::Edit if kind == General => self.server_form(Some(sheet.obj.clone())),
+                _ => {}
+            }
+            return;
+        }
         if op == TabOp::Reload {
             tab.requested = false;
             return;

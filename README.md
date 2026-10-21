@@ -11,6 +11,7 @@ and talks to Microsoft Graph directly.
 | **Groups** | Create (security / Microsoft 365, optionally role-assignable), edit, delete; manage members (also in bulk from CSV), owners, licences and **directory role assignments** |
 | **Devices** | View details, owners, users and group membership; enable/disable; delete |
 | **Applications** | View the enterprise applications connected to the tenant; enable/disable sign-in; delete; set whether assignment is required and whether users see them; manage the users and groups assigned, owners, and review or revoke the permissions granted to them |
+| **Remote Servers** | Keep watch over Linux servers by SSH, with a password or an SSH key: operating system and kernel, installed applications, running services, pending (and security) updates and whether a restart is needed. Needs no Microsoft sign-in |
 | **Exchange Online › Mailboxes** | Create shared mailboxes; convert between user and shared mailboxes; set forwarding and automatic replies; give Full Access, Send As and Send on behalf; hide from address lists; delete shared, room and equipment mailboxes |
 | **Exchange Online › Distribution lists** | Create distribution lists and mail-enabled security groups, edit, delete and manage members |
 | **Licences** | View subscriptions, service plans and licensed users; assign or remove licences |
@@ -288,6 +289,36 @@ Like a CSV export it saves what's on screen, so filter first to export part of a
 
 The server, port, user name, database and TLS setting are remembered in the `[mariadb]` section
 of `settings.ini`. The password is asked for each time and never saved.
+
+## Remote Servers
+
+**Remote Servers** lists servers you check over SSH. It has nothing to do with Microsoft, so it
+works without signing in. **Add server…** asks for the host, SSH port, user name and how to sign
+in: a **password**, or an **SSH key** file such as `~/.ssh/id_ed25519` (OpenSSH, PEM or PKCS#8;
+Ed25519, ECDSA and RSA). **Check now** checks the selected server, and **Refresh** (F5) checks them
+all. **Properties** shows what the last check found, on the **General**, **Installed
+applications**, **Running services** and **Updates** tabs; Refresh there checks again, and
+**Edit…** changes how the server is reached.
+
+- **Passwords and passphrases are never saved.** You are asked the first time a server is
+  checked, and the answer is kept in memory until you close the app.
+- **Host keys are checked.** A server whose key is in your `~/.ssh/known_hosts` is trusted as it
+  is, so servers you already reach with `ssh` need no confirming. For any other server the app
+  shows the key's fingerprint to confirm, then saves it in its own `known_hosts` file beside
+  `settings.ini`. If a server's key has changed, the app refuses to connect, as `ssh` does.
+- **The check only reads.** It runs a short shell script (`REPORT_SCRIPT` in `src/servers.rs`)
+  as the user you sign in as, with nothing run through `sudo`, and changes nothing. Package lists
+  aren't refreshed, so pending updates are as of the server's own last refresh, and the General
+  tab shows when that was (on apt).
+- What it reads depends on the package manager: apt (Debian, Ubuntu), dnf or yum (RHEL, Rocky,
+  Alma, Fedora), zypper (SUSE), pacman (Arch, listing updates needs `checkupdates`) and apk
+  (Alpine). Security updates are counted on apt, dnf, yum and zypper. Whether a restart is
+  needed is known on apt, on dnf and yum when `needs-restarting` is installed, and on zypper.
+  Running services come from systemd, or, without systemd, the list of running programs.
+- The list and each server's last results are kept in `servers.json` beside `settings.ini`, so
+  they are there when the app starts.
+
+Windows servers aren't supported, as the check needs a Unix shell.
 
 ## Updates
 

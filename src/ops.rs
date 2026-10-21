@@ -36,6 +36,7 @@ pub enum Act {
     Security,
     RevokeSessions,
     TemporaryAccessPass,
+    CheckServer,
 }
 
 impl Act {
@@ -65,7 +66,8 @@ impl Act {
             | Act::Offboard
             | Act::Security
             | Act::RevokeSessions
-            | Act::TemporaryAccessPass => vec![],
+            | Act::TemporaryAccessPass
+            | Act::CheckServer => vec![],
         }
     }
 
@@ -80,6 +82,7 @@ pub fn node_actions(node: Node) -> Vec<Act> {
         Node::Users => vec![Act::New, Act::Onboard, Act::ImportUsers, Act::ExportList, Act::ExportDatabase, Act::Refresh],
         Node::Groups | Node::Mailboxes | Node::DistributionLists => vec![Act::New, Act::ExportList, Act::ExportDatabase, Act::Refresh],
         Node::Devices | Node::Applications | Node::Licences => vec![Act::ExportList, Act::ExportDatabase, Act::Refresh],
+        Node::RemoteServers => vec![Act::New, Act::ExportList, Act::Refresh],
         Node::Root | Node::Exchange => vec![],
     }
 }
@@ -108,6 +111,7 @@ pub fn item_actions(node: Node) -> Vec<Act> {
         Node::Devices => vec![Properties, ToggleEnabled, Delete],
         Node::Applications => vec![Properties, ToggleEnabled, AssignToUser, Delete],
         Node::Licences => vec![Properties, AssignToUser],
+        Node::RemoteServers => vec![Properties, CheckServer, Delete],
     }
 }
 
@@ -119,7 +123,7 @@ pub fn collection(node: Node) -> &'static str {
         Node::Devices => "devices",
         Node::Applications => "servicePrincipals",
         Node::Licences => "subscribedSkus",
-        Node::Root | Node::Exchange | Node::Mailboxes | Node::DistributionLists => "",
+        Node::Root | Node::Exchange | Node::Mailboxes | Node::DistributionLists | Node::RemoteServers => "",
     }
 }
 
@@ -134,6 +138,7 @@ impl App {
                 Node::Groups => "act.new_group",
                 Node::Mailboxes => "act.new_shared_mailbox",
                 Node::DistributionLists => "act.new_distribution_list",
+                Node::RemoteServers => "act.add_server",
                 _ => "act.new",
             },
             Act::Properties => "act.properties",
@@ -152,6 +157,7 @@ impl App {
             Act::AssignRole => "act.assign_role",
             Act::AssignToUser if self.node == Node::Applications => "act.assign_users_groups",
             Act::AssignToUser => "act.assign_to_user",
+            Act::Delete if self.node == Node::RemoteServers => "act.remove_server",
             Act::Delete => "act.delete",
             Act::ExportList => "act.export_list",
             Act::ExportDatabase => "act.export_database",
@@ -168,6 +174,7 @@ impl App {
             Act::Security => "act.security",
             Act::RevokeSessions => "act.revoke_sessions",
             Act::TemporaryAccessPass => "act.temporary_access_pass",
+            Act::CheckServer => "act.check_server",
         })
     }
 
@@ -193,6 +200,7 @@ impl App {
                 Node::Groups => self.new_group(),
                 Node::Mailboxes => self.new_shared_mailbox(),
                 Node::DistributionLists => self.new_distribution_list(),
+                Node::RemoteServers => self.server_form(None),
                 _ => {}
             },
             Act::ToggleEnabled => self.toggle_enabled(node, obj),
@@ -226,6 +234,7 @@ impl App {
                     app.set_licence("users", &u.id, &sku, true, |app| app.load(Node::Licences));
                 });
             }
+            Act::Delete if node == Node::RemoteServers => self.remove_server(obj),
             Act::Delete if matches!(node, Node::Mailboxes | Node::DistributionLists) => self.delete_exchange(node, obj),
             Act::Delete => self.delete_obj(node, id, name),
             Act::ExportList => self.export_list(),
@@ -243,6 +252,7 @@ impl App {
             }
             Act::RevokeSessions => self.revoke_sessions(obj, |_| {}),
             Act::TemporaryAccessPass => self.temporary_access_pass(obj, |_| {}),
+            Act::CheckServer => self.check_server(&id),
         }
     }
 
