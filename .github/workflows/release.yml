@@ -16,7 +16,9 @@
 #     GPL, the font licence, the icon credit and the Visual C++ runtime DLLs it imports. WiX Toolset then
 #     builds an MSI installer from those files, described by
 #     src/installer/stormcloud.wxs, and the job tests installing, upgrading and
-#     uninstalling it.
+#     uninstalling it. The job runs once for x86_64 and once, on an Arm
+#     runner, for arm64; both MSIs share an upgrade code, so installing one
+#     replaces the other.
 #
 # The tag must match the version in Cargo.toml, which names the .deb and .pkg,
 # and must be three numbers such as v1.0.0, because the MSI's version comes
@@ -36,8 +38,18 @@ env:
 
 jobs:
   windows:
-    name: Windows (x86_64)
-    runs-on: windows-latest
+    name: Windows (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          # arch is the name WiX and the Visual C++ folders use; label goes in
+          # the file name.
+          - { runner: windows-latest, arch: x64, label: x86_64 }
+          - { runner: windows-11-arm, arch: arm64, label: arm64 }
+    env:
+      ARCH: ${{ matrix.arch }}
+      LABEL: ${{ matrix.label }}
     steps:
       - uses: actions/checkout@v7.0.1
       # Windows Installer versions are three numbers, the first two at most
@@ -70,15 +82,15 @@ jobs:
         shell: pwsh
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
-          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -Last 1
-          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory | Select-Object -Last 1
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Host$env:ARCH\$env:ARCH\dumpbin.exe" | Select-Object -Last 1
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\$env:ARCH\Microsoft.VC*.CRT" -Directory | Select-Object -Last 1
           if (-not $dumpbin -or -not $crt) { throw "Visual C++ tools or runtime not found under $vs" }
           $imports = & $dumpbin.FullName /nologo /dependents target\release\stormcloud.exe |
             ForEach-Object { $_.Trim() } | Where-Object { $_ -like '*.dll' }
           $dlls = $imports | ForEach-Object { Join-Path $crt.FullName $_ } | Where-Object { Test-Path $_ }
           if (-not $dlls) { throw "No Visual C++ runtime DLLs found in the exe's imports: $($imports -join ', ')" }
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $folder = "stormcloud-$version-windows-x86_64"
+          $folder = "stormcloud-$version-windows-$env:LABEL"
           New-Item -ItemType Directory -Force "stage\$folder", dist | Out-Null
           Copy-Item -Path (@('target\release\stormcloud.exe') + $dlls) -Destination "stage\$folder"
           Copy-Item LICENSE "stage\$folder\LICENSE.txt"
@@ -104,10 +116,10 @@ jobs:
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $folder = "stormcloud-$version-windows-x86_64"
+          $folder = "stormcloud-$version-windows-$env:LABEL"
           $stage = (Resolve-Path "stage\$folder").Path
           $runtime = (Get-ChildItem $stage -Filter *.dll).Name
-          wix build src\installer\stormcloud.wxs -arch x64 -culture en-US -ext WixToolset.UI.wixext -pdbtype none `
+          wix build src\installer\stormcloud.wxs -arch $env:ARCH -culture en-US -ext WixToolset.UI.wixext -pdbtype none `
             -d "Version=$version" -d "StageDir=$stage" -d "RuntimeDlls=$($runtime -join ';')" `
             -o "dist\$folder.msi"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -118,7 +130,7 @@ jobs:
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $folder = "stormcloud-$version-windows-x86_64"
+          $folder = "stormcloud-$version-windows-$env:LABEL"
           $msi = (Resolve-Path "dist\$folder.msi").Path
           $upgradeCode = '{' + ([xml](Get-Content src\installer\stormcloud.wxs)).Wix.Package.UpgradeCode + '}'
           # The Windows Installer COM objects only work through late binding.
@@ -161,7 +173,7 @@ jobs:
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $folder = "stormcloud-$version-windows-x86_64"
+          $folder = "stormcloud-$version-windows-$env:LABEL"
           $msi = (Resolve-Path "dist\$folder.msi").Path
           $stage = (Resolve-Path "stage\$folder").Path
           $upgradeCode = '{' + ([xml](Get-Content src\installer\stormcloud.wxs)).Wix.Package.UpgradeCode + '}'
@@ -193,7 +205,7 @@ jobs:
 
           $runtime = (Get-ChildItem $stage -Filter *.dll).Name
           $old = "$env:RUNNER_TEMP\stormcloud-old.msi"
-          wix build src\installer\stormcloud.wxs -arch x64 -culture en-US -ext WixToolset.UI.wixext -pdbtype none `
+          wix build src\installer\stormcloud.wxs -arch $env:ARCH -culture en-US -ext WixToolset.UI.wixext -pdbtype none `
             -d "Version=0.0.1" -d "StageDir=$stage" -d "RuntimeDlls=$($runtime -join ';')" -o $old
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -231,7 +243,7 @@ jobs:
           Write-Host 'Installed, upgraded, started and uninstalled; settings were kept.'
       - uses: actions/upload-artifact@v7.0.1
         with:
-          name: windows
+          name: windows-${{ matrix.label }}
           path: dist/*.msi
           if-no-files-found: error
           retention-days: 21
@@ -358,6 +370,7 @@ jobs:
 
             if (process.env.SCAN_OUTCOME === 'success') {
               const platform = (name) =>
+                name.endsWith('-arm64.msi') ? 'Windows on Arm installer' :
                 name.endsWith('.msi') ? 'Windows installer' :
                 name.endsWith('.deb') ? 'Ubuntu' :
                 name.includes('-macos-') ? 'Apple Silicon' : '';

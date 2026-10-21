@@ -357,7 +357,7 @@ in `Cargo.toml`, and the repository needs a `VT_API_KEY` secret.
 
 | Download | Built by |
 | --- | --- |
-| Windows `.msi` (per-user install, no administrator rights needed) | WiX Toolset 6 from `src/installer/stormcloud.wxs` |
+| Windows `.msi` for x86_64 and arm64 (per-user install, no administrator rights needed) | WiX Toolset 6 from `src/installer/stormcloud.wxs` |
 | Ubuntu `.deb` (22.04 and later) | `stormcloud --package-deb DIR` (`src/platform/linux.rs`) |
 | Apple Silicon `.pkg` (installs into /Applications) | `stormcloud --package-macos DIR` (`src/platform/macos.rs`) |
 
