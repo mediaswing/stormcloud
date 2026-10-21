@@ -21,8 +21,8 @@ use crate::i18n::{t, tf};
 use crate::model::{s, yes_no, Node};
 use crate::sheets::{table, TabBody, TabKind};
 use anyhow::{anyhow, bail, Context};
-use russh::keys::{self, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
-use russh::{client, ChannelMsg, Disconnect};
+use russh::keys::{self, Algorithm, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
+use russh::{client, ChannelMsg, Disconnect, Preferred};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -33,7 +33,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DEFAULT_PORT: u16 = 22;
 /// How long to wait for the server to answer and agree keys.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-/// How long a whole check may take. Listing updates on dnf can mean downloading metadata.
+/// How long a whole check may take. Listing updates on dnf can mean downloading metadata, and
+/// [`REPORT_SCRIPT`] lists them twice, each with its own 100-second limit.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(240);
 /// More output than this means something other than the report is being printed.
 const MAX_OUTPUT: usize = 32 * 1024 * 1024;
@@ -101,19 +102,31 @@ fn default_key_path() -> String {
         .unwrap_or_default()
 }
 
-/// The saved list. A file that can't be read is kept aside as `servers.json.bad`, so adding a
-/// server doesn't write over it.
-pub fn load_rows() -> Vec<Value> {
+/// The saved list, and what to tell the user when some or all of it couldn't be read. The file
+/// is then copied to `servers.json.bad`, so saving the list doesn't lose what was left out.
+pub fn load_rows() -> (Vec<Value>, Option<String>) {
     let path = servers_path();
-    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
-    match serde_json::from_str::<Vec<Value>>(&text) {
-        Ok(rows) => rows.into_iter().filter(|r| serde_json::from_value::<Server>(r.clone()).is_ok()).collect(),
-        Err(e) => {
-            log::error!("Could not read {}: {e}", path.display());
-            let _ = std::fs::rename(&path, path.with_extension("json.bad"));
-            Vec::new()
+    let Ok(text) = std::fs::read_to_string(&path) else { return (Vec::new(), None) };
+    let backup = path.with_extension("json.bad");
+    let (rows, problem) = match serde_json::from_str::<Vec<Value>>(&text) {
+        Ok(rows) => {
+            let total = rows.len();
+            let rows: Vec<Value> = rows.into_iter().filter(|r| serde_json::from_value::<Server>(r.clone()).is_ok()).collect();
+            let skipped = total - rows.len();
+            let problem = (skipped > 0).then(|| {
+                tf("server.bad_entries", &[("count", &skipped), ("path", &path.display()), ("backup", &backup.display())])
+            });
+            (rows, problem)
+        }
+        Err(e) => (Vec::new(), Some(tf("server.bad_file", &[("path", &path.display()), ("error", &e), ("backup", &backup.display())]))),
+    };
+    if let Some(problem) = &problem {
+        log::error!("{problem}");
+        if let Err(e) = std::fs::copy(&path, &backup) {
+            log::error!("Could not copy {} to {}: {e}", path.display(), backup.display());
         }
     }
+    (rows, problem)
 }
 
 /// Saves the list, leaving out what only matters while the app runs.
@@ -233,6 +246,22 @@ fn host_key_problem(host: &str, port: u16, key: &PublicKey, files: &[PathBuf]) -
     (!known).then(|| HostKeyProblem::Unknown(key.clone()))
 }
 
+/// The host key algorithms to offer, those already in a known_hosts file for the server first,
+/// so a server known by its RSA key isn't asked for an Ed25519 key that would need confirming.
+fn preferred_host_keys(host: &str, port: u16, files: &[PathBuf]) -> Vec<Algorithm> {
+    let known: Vec<Algorithm> = files
+        .iter()
+        .filter_map(|path| keys::known_hosts::known_host_keys_path(host, port, path).ok())
+        .flatten()
+        .map(|(_, key)| key.algorithm())
+        .collect();
+    // known_hosts records RSA keys as ssh-rsa, whichever hash signs with them.
+    let is_known = |a: &Algorithm| known.iter().any(|k| k == a || matches!((k, a), (Algorithm::Rsa { .. }, Algorithm::Rsa { .. })));
+    let (mut first, rest): (Vec<Algorithm>, Vec<Algorithm>) = Preferred::DEFAULT.key.iter().cloned().partition(|a| is_known(a));
+    first.extend(rest);
+    first
+}
+
 /// Records `key` as the host key for the server in the known_hosts file at `path`.
 pub fn trust_host_key(server: &Server, key: &PublicKey, path: &std::path::Path) -> anyhow::Result<()> {
     keys::known_hosts::learn_known_hosts_path(&server.host, server.port, key, path)
@@ -272,6 +301,9 @@ async fn sign_in(session: &mut client::Handle<Verifier>, server: &Server, secret
         }
         AuthMethod::Key => {
             let path = expand_home(&server.key_path);
+            if !path.is_file() {
+                bail!(tf("server.no_key_file", &[("path", &path.display())]));
+            }
             let key = match keys::load_secret_key(&path, secret) {
                 Ok(key) => key,
                 Err(keys::Error::KeyIsEncrypted) => return Err(NeedsSecret.into()),
@@ -299,6 +331,7 @@ async fn fetch(server: &Server, secret: Option<&str>, known_hosts: Vec<PathBuf>)
     let config = Arc::new(client::Config {
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 4,
+        preferred: Preferred { key: preferred_host_keys(&server.host, server.port, &known_hosts).into(), ..Preferred::DEFAULT },
         ..Default::default()
     });
     let problem = Arc::new(Mutex::new(None));
@@ -371,7 +404,7 @@ fn check_with(server: &Server, secret: Option<String>, known_hosts: Vec<PathBuf>
 pub const REPORT_SCRIPT: &str = r#"LC_ALL=C
 export LC_ALL
 have() { command -v "$1" >/dev/null 2>&1; }
-limit() { if have timeout; then timeout 180 "$@"; else "$@"; fi; }
+limit() { if have timeout; then timeout 100 "$@"; else "$@"; fi; }
 echo @@uname
 uname -s; uname -r; uname -m
 echo @@hostname
@@ -402,8 +435,22 @@ if have dpkg-query; then
     limit apt list --upgradable 2>/dev/null
     echo "@@status $?"
   fi
+  # reboot-required is written by update-notifier-common (Ubuntu) and unattended-upgrades;
+  # without either, needrestart can compare the running kernel with the newest installed.
   echo @@reboot
-  if [ -e /var/run/reboot-required ]; then echo yes; else echo no; fi
+  if [ -e /var/run/reboot-required ]; then
+    echo yes
+  elif [ -e /usr/share/update-notifier/notify-reboot-required ] || [ -e /etc/kernel/postinst.d/unattended-upgrades ]; then
+    echo no
+  elif [ -x /usr/sbin/needrestart ]; then
+    case "$(/usr/sbin/needrestart -b -k 2>/dev/null | sed -n 's/^NEEDRESTART-KSTA: //p')" in
+      1) echo no ;;
+      2|3) echo yes ;;
+      *) echo unknown ;;
+    esac
+  else
+    echo unknown
+  fi
 elif have rpm; then
   echo @@packages
   rpm -qa --qf '%{NAME}\t%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null | grep -v '^gpg-pubkey'
@@ -842,6 +889,11 @@ pub fn tab_body(kind: TabKind, v: &Value) -> TabBody {
     }
 }
 
+/// Whether the row still reaches the server as `server` does, whatever it is called.
+fn reached_the_same(row: &Value, server: &Server) -> bool {
+    serde_json::from_value::<Server>(row.clone()).is_ok_and(|now| Server { name: server.name.clone(), ..now } == *server)
+}
+
 // ----- the app -----------------------------------------------------------------
 
 impl App {
@@ -898,9 +950,14 @@ impl App {
 
     fn server_checked(&mut self, server: Server, result: anyhow::Result<Report>) {
         let id = server.id.clone();
-        if self.server_row(&id).is_none() {
+        let Some(row) = self.server_row(&id) else {
             // Removed while it was being checked.
             return;
+        };
+        if !reached_the_same(row, &server) {
+            // Changed to reach another server, or in another way, while it was being checked.
+            self.update_server(json!({ "id": id, "checking": false }));
+            return self.check_server(&id);
         }
         let e = match result {
             Ok(report) => {
@@ -939,10 +996,12 @@ impl App {
 
     /// Asks for the server's password, or its key's passphrase, for this session.
     fn ask_server_secret(&mut self, server: Server, problem: Option<String>) {
-        let title = tf("server.sign_in_title", &[("name", &server.name)]);
-        if self.dialogs.iter().any(|d| matches!(&d.dialog, Dialog::Form(f) if f.title == title)) {
+        if let Some(&open) = self.ssh_prompts.get(&server.id)
+            && self.dialogs.iter().any(|d| d.id == open)
+        {
             return;
         }
+        let title = tf("server.sign_in_title", &[("name", &server.name)]);
         let account = format!("{}@{}", server.user, server.host);
         let mut intro = match server.auth {
             AuthMethod::Password => tf("server.password_intro", &[("account", &account)]),
@@ -953,6 +1012,7 @@ impl App {
         }
         let label = t(if server.auth == AuthMethod::Password { "field.password" } else { "server.field_passphrase" });
         let id = server.id;
+        let prompt_for = id.clone();
         let form = Form::new(&title, &t("server.sign_in"))
             .intro(&intro)
             .field(Field::password("secret", &label, "").required())
@@ -961,7 +1021,8 @@ impl App {
                 app.check_server(&id);
                 Ok(())
             });
-        self.push(Dialog::Form(form));
+        let open = self.push(Dialog::Form(form));
+        self.ssh_prompts.insert(prompt_for, open);
     }
 
     fn confirm_host_key(&mut self, server: Server, key: PublicKey) {
@@ -1038,9 +1099,13 @@ impl App {
                 let row = serde_json::to_value(&server).map_err(|e| e.to_string())?;
                 match &old {
                     Some(before) => {
-                        let reached_the_same = Server { name: before.name.clone(), ..server.clone() } == *before;
-                        if !reached_the_same {
+                        let mut row = row;
+                        if (Server { name: before.name.clone(), ..server.clone() }) != *before {
+                            // The last check was of another server, or as another user.
                             app.ssh_secrets.remove(&server.id);
+                            for key in ["state", "error", "checked_at", "report"] {
+                                row[key] = Value::Null;
+                            }
                         }
                         app.update_server(row);
                         app.save_servers();
@@ -1219,6 +1284,26 @@ mod tests {
         println!("{report:#?}");
         assert!(!report.kernel.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn known_host_key_types_are_asked_for_first() {
+        let dir = std::env::temp_dir().join(format!("stormcloud-preferred-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("known_hosts");
+        let files = vec![file.clone()];
+        assert_eq!(preferred_host_keys("web", 22, &files), Preferred::DEFAULT.key.to_vec());
+        std::fs::write(&file, "web ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQDnJlkoZ3Nq+9Gm1pM8hwuOkCq0VdQkLzxPSu0IPLLHZ6Vq7gW3U0dCtFaKD4Pl6E8Ah2N59Sx4qfAVwLqN37NQnBQ0ChVQtHAm4C4eyBG+iX+WvRZ/wMjtmGeXiprD0Fsv0Xx4+QHAhrSAvdbpU9Ftfsbr6cJbFzRlpbCyDqh+lw==\n").unwrap();
+        let order = preferred_host_keys("web", 22, &files);
+        assert!(matches!(order[0], Algorithm::Rsa { .. }));
+        assert_eq!(order.len(), Preferred::DEFAULT.key.len());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_restart_is_not_a_no() {
+        let r = parse_report("@@uname\nLinux\n6.1\nx86_64\n@@manager\napt\n@@reboot\nunknown\n@@end\n");
+        assert_eq!(r.reboot_required, None);
     }
 
     #[test]

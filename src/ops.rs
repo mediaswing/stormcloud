@@ -823,6 +823,16 @@ mod tests {
     }
 
     #[test]
+    fn admin_tools() {
+        let app = |id: &str| json!({ "appId": id });
+        let own = "AAAAAAAA-1111-2222-3333-444444444444";
+        assert!(crate::model::is_admin_tool(&app("aaaaaaaa-1111-2222-3333-444444444444"), own));
+        assert!(crate::model::is_admin_tool(&app("14d82eec-204b-4c2f-b7e8-296a70dab67e"), ""));
+        assert!(!crate::model::is_admin_tool(&app("11111111-2222-3333-4444-555555555555"), own));
+        assert!(!crate::model::is_admin_tool(&json!({}), ""));
+    }
+
+    #[test]
     fn usage_locations() {
         assert!(is_usage_location("") && is_usage_location("gb"));
         assert!(!is_usage_location("GBR") && !is_usage_location("G1"));

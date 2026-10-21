@@ -74,6 +74,8 @@ pub struct App {
     focus_filter: bool,
     file_menu_id: Option<egui::Id>,
     show_actions: bool,
+    /// Show this app and Microsoft's command-line tools in Applications (see `model::is_admin_tool`).
+    show_admin_tools: bool,
 
     pub dialogs: Vec<DialogEntry>,
     pub closed_dialogs: Vec<u64>,
@@ -85,6 +87,8 @@ pub struct App {
     pub translation: Option<Arc<crate::language::Job>>,
     /// Remote Servers' passwords and key passphrases, by server ID, kept only while the app runs.
     pub ssh_secrets: HashMap<String, String>,
+    /// The open password prompt of each Remote Server that has one, by server ID.
+    pub ssh_prompts: HashMap<String, u64>,
     quit: bool,
 }
 
@@ -164,6 +168,7 @@ impl App {
             focus_filter: false,
             file_menu_id: None,
             show_actions: true,
+            show_admin_tools: false,
             dialogs: Vec::new(),
             closed_dialogs: Vec::new(),
             pending_picker_search: Vec::new(),
@@ -172,9 +177,14 @@ impl App {
             status: t("status.ready"),
             translation: None,
             ssh_secrets: HashMap::new(),
+            ssh_prompts: HashMap::new(),
             quit: false,
         };
-        app.data.insert(Node::RemoteServers, crate::servers::load_rows());
+        let (servers, problem) = crate::servers::load_rows();
+        app.data.insert(Node::RemoteServers, servers);
+        if let Some(problem) = problem {
+            app.error(&t("server.load_title"), problem);
+        }
         app.language_changed();
         if app.settings.is_complete() {
             app.connect();
@@ -741,6 +751,13 @@ impl App {
         }
     }
 
+    /// Whether a row is left out of the list whatever the filter, as admin tools are by default.
+    fn hidden(&self, v: &Value) -> bool {
+        self.node == Node::Applications
+            && !self.show_admin_tools
+            && crate::model::is_admin_tool(v, &self.settings.client_id)
+    }
+
     fn rebuild_view(&mut self) {
         let prev = match self.sel_before_change.take() {
             Some(prev) => prev,
@@ -751,6 +768,7 @@ impl App {
         let cols = self.node.columns();
         let needle = self.filter.trim().to_lowercase();
         let mut view: Vec<usize> = (0..rows.len())
+            .filter(|&i| !self.hidden(&rows[i]))
             .filter(|&i| {
                 needle.is_empty() || cols.iter().any(|c| (c.get)(&rows[i]).to_lowercase().contains(&needle))
             })
@@ -922,6 +940,9 @@ impl App {
                     }
                     ui.separator();
                     ui.checkbox(&mut self.show_actions, t("menu.actions_pane"));
+                    if ui.checkbox(&mut self.show_admin_tools, t("menu.show_admin_tools")).changed() {
+                        self.view_dirty = true;
+                    }
                     ui.separator();
                     ui.label(t("menu.theme"));
                     egui::widgets::global_theme_preference_buttons(ui);
@@ -1015,7 +1036,7 @@ impl App {
                     }
                     ui.separator();
                     if self.node.is_list() {
-                        let total = self.data.get(&self.node).map_or(0, Vec::len);
+                        let total = self.data.get(&self.node).map_or(0, |rows| rows.iter().filter(|v| !self.hidden(v)).count());
                         if self.view.len() == total {
                             ui.label(tf("status.count", &[("count", &total), ("list", &self.node.list_name())]));
                         } else {

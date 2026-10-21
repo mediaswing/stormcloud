@@ -11,10 +11,10 @@ and talks to Microsoft Graph directly.
 | **Groups** | Create (security / Microsoft 365, optionally role-assignable), edit, delete; manage members (also in bulk from CSV), owners, licences and **directory role assignments** |
 | **Devices** | View details, owners, users and group membership; enable/disable; delete |
 | **Applications** | View the enterprise applications connected to the tenant; enable/disable sign-in; delete; set whether assignment is required and whether users see them; manage the users and groups assigned, owners, and review or revoke the permissions granted to them |
-| **Remote Servers** | Keep watch over Linux servers by SSH, with a password or an SSH key: operating system and kernel, installed applications, running services, pending (and security) updates and whether a restart is needed. Needs no Microsoft sign-in |
 | **Exchange Online › Mailboxes** | Create shared mailboxes; convert between user and shared mailboxes; set forwarding and automatic replies; give Full Access, Send As and Send on behalf; hide from address lists; delete shared, room and equipment mailboxes |
 | **Exchange Online › Distribution lists** | Create distribution lists and mail-enabled security groups, edit, delete and manage members |
 | **Licences** | View subscriptions, service plans and licensed users; assign or remove licences |
+| **Remote Servers** | Keep watch over Linux servers by SSH, with a password or an SSH key: operating system and kernel, installed applications, running services, pending (and security) updates and whether a restart is needed. Needs no Microsoft sign-in |
 
 ## Setup
 
@@ -313,7 +313,8 @@ applications**, **Running services** and **Updates** tabs; Refresh there checks 
 - What it reads depends on the package manager: apt (Debian, Ubuntu), dnf or yum (RHEL, Rocky,
   Alma, Fedora), zypper (SUSE), pacman (Arch, listing updates needs `checkupdates`) and apk
   (Alpine). Security updates are counted on apt, dnf, yum and zypper. Whether a restart is
-  needed is known on apt, on dnf and yum when `needs-restarting` is installed, and on zypper.
+  needed is known on Ubuntu, on Debian with `unattended-upgrades` or `needrestart` installed, on
+  dnf and yum when `needs-restarting` is installed, and on zypper; otherwise it is left blank.
   Running services come from systemd, or, without systemd, the list of running programs.
 - The list and each server's last results are kept in `servers.json` beside `settings.ini`, so
   they are there when the app starts.

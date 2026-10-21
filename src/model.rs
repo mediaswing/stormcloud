@@ -33,11 +33,11 @@ pub const TREE: &[(Node, usize)] = &[
     (Node::Groups, 1),
     (Node::Devices, 1),
     (Node::Applications, 1),
-    (Node::RemoteServers, 1),
     (Node::Licences, 1),
     (Node::Exchange, 1),
     (Node::Mailboxes, 2),
     (Node::DistributionLists, 2),
+    (Node::RemoteServers, 1),
 ];
 
 pub struct Column {
@@ -231,6 +231,24 @@ impl Node {
             _ => s(v, "displayName"),
         }
     }
+}
+
+/// Microsoft's command-line tools that sign in to a tenant as enterprise applications: Microsoft
+/// Graph Command Line Tools (PowerShell), Exchange Online PowerShell, Azure CLI and Azure PowerShell.
+const MICROSOFT_TOOLS: [&str; 4] = [
+    "14d82eec-204b-4c2f-b7e8-296a70dab67e",
+    "fb78d390-0c51-40cd-8e17-fdbfab77341b",
+    "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+    "1950a258-227b-4e31-a9cf-717495945fc2",
+];
+
+/// Whether an application is this app's own registration (`client_id`) or one of Microsoft's
+/// command-line tools, which Applications hides unless View › Show admin tools is ticked.
+pub fn is_admin_tool(v: &Value, client_id: &str) -> bool {
+    let app_id = s(v, "appId");
+    let client_id = client_id.trim();
+    !client_id.is_empty() && app_id.eq_ignore_ascii_case(client_id)
+        || MICROSOFT_TOOLS.iter().any(|id| app_id.eq_ignore_ascii_case(id))
 }
 
 /// Tenants that own Microsoft's first-party applications.

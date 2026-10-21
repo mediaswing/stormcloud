@@ -8,12 +8,18 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 
 ### Added
 
-- **Remote Servers:** a new node below Applications lists Linux servers you keep watch over by
+- **Remote Servers:** a new node below Exchange Online lists Linux servers you keep watch over by
   SSH, signing in with a password or an SSH key. For each server it shows the operating system
   and kernel, installed applications, running services, pending and security updates, and whether
   a restart is needed. Passwords and passphrases are asked for once a session and never saved,
   and host keys are checked against `~/.ssh/known_hosts` or confirmed the first time.
 - The Windows release now includes an installer for Windows on Arm (arm64).
+
+### Changed
+
+- **Applications** no longer lists this app's own registration or Microsoft's command-line tools
+  (Microsoft Graph Command Line Tools, Exchange Online PowerShell, Azure CLI and Azure
+  PowerShell). Tick **View › Show admin tools in Applications** to see them.
 
 ## [1.4.0] - 2026-10-20
 
