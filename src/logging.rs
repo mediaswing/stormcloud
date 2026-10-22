@@ -72,9 +72,10 @@ fn open_private(path: &Path) -> std::io::Result<File> {
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         options.mode(0o600);
-        // A log made by an earlier version may be readable by everyone.
+        // A log made by an earlier version may be readable by everyone. Some file systems (FAT,
+        // network shares) have no such permissions and refuse, which mustn't stop the log.
         if path.exists() {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
         }
     }
     options.open(path)
