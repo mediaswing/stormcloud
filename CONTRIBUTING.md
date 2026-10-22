@@ -32,9 +32,10 @@ A good bug report says:
 - the Entra roles you were signed in with, if the problem is with changing
   something
 
-The debug log (`output.log`, in the same folder as `settings.ini`) often helps.
-Once it passes 5 MB it's renamed to `output.log.1`, so the lines you need may be
-in that file instead. It never records passwords, client secrets or tokens, but
+The log (`output.log`, in the same folder as `settings.ini`) often helps. Set
+`level = debug` in the `[logging]` section of `settings.ini`, restart the app and
+do what went wrong again, so it records every request. Once it reaches 5 MB it's
+renamed to `output.log.1`, so the lines you need may be in that file instead. It never records passwords, client secrets or tokens, but
 it does contain user names, group names, request bodies and your tenant ID, so
 please check it and remove anything you don't want to make public before
 attaching it.

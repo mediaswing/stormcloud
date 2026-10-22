@@ -20,9 +20,14 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 - Clicking the text in any column of the results list or a properties table now selects the row.
 - On a Mac, menus and Keyboard shortcuts show ⌘N and ⌘⌫ for adding and removing, rather than
   Insert and Delete keys that Mac keyboards don't have.
+- The log is kept at the `info` level for new installs, so it no longer records the path of every
+  request, which can name users, unless you set `level = debug`. Existing settings are kept.
+- On macOS and Linux, only you can read the log, as with the saved sign-in.
 
 ### Fixed
 
+- The log starts afresh when it reaches 5 MB while the app is running, rather than only at the
+  next start, so a long session can no longer make it grow without limit.
 - Importing a large CSV file no longer freezes the app: a file of 50,000 rows took minutes to
   read, and now takes a moment.
 - A problem inside the app during a background task is now reported as an error, rather than

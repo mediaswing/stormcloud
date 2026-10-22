@@ -85,7 +85,7 @@ graph_endpoint = https://graph.microsoft.com
 exchange_endpoint = https://outlook.office365.com
 
 [logging]
-level = debug
+level = info
 
 [updates]
 check = true
@@ -335,18 +335,25 @@ when starting** in **File › Settings…**, or with `check = false` in the `[up
 
 ## Logging
 
-Debug information is appended to `output.log` in the same folder as `settings.ini`. It records startup,
-sign-in steps (including full AADSTS error responses), every Graph request with its status, duration and
-`request-id`, request bodies, the commands you run, and any errors or panics. Passwords, client secrets
-and tokens are never written: password and secret fields in request bodies are masked as `***`.
-When the file passes 5 MB it is renamed to `output.log.1` at the next start.
+The app keeps a log, `output.log`, in the same folder as `settings.ini`. At the `info` level, the
+default, it records startup, sign-in steps (including full AADSTS error responses), the commands you
+run, and any errors or panics, with the `request-id` of each failed request. At `debug` it also records
+every Graph request with its status, duration and `request-id`, and request bodies, which name users
+and groups. Passwords, client secrets and tokens are never written: password and secret fields in
+request bodies are masked as `***`. On macOS and Linux only you can read the file.
+
+When the file reaches 5 MB, it is renamed to `output.log.1` (replacing the one before) and a new
+one is started, so it never takes more than about 10 MB.
 
 Set the detail level in `settings.ini`:
 
 ```ini
 [logging]
-level = debug   ; off, error, warn, info, debug or trace
+level = info   ; off, error, warn, info, debug or trace
 ```
+
+Versions up to 1.5.0 used `debug` by default, and wrote it into `settings.ini`, so an older install
+keeps logging at `debug` until you change it.
 
 ## Keyboard
 

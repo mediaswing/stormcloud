@@ -78,7 +78,7 @@ impl Default for Settings {
             graph_endpoint: "https://graph.microsoft.com".to_string(),
             exchange_endpoint: "https://outlook.office365.com".to_string(),
             exchange_scopes: "Exchange.Manage".to_string(),
-            log_level: "debug".to_string(),
+            log_level: "info".to_string(),
             update_check: true,
             skipped_version: String::new(),
             db_host: String::new(),
