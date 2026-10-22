@@ -887,7 +887,7 @@ impl App {
             _ => return,
         };
         let form = form.on_submit(move |app, f| {
-            if !crate::ops::is_usage_location(&f.text("usageLocation")) {
+            if !crate::validate::is_usage_location(&f.text("usageLocation")) {
                 return Err(t("user.bad_usage_location"));
             }
             let mut body = json!({});

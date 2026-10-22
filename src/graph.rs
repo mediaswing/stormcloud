@@ -129,19 +129,7 @@ impl Graph {
     }
 
     fn list_inner(&self, path: &str, eventual: bool) -> Result<(Vec<Value>, bool)> {
-        let mut out = Vec::new();
-        let mut next = Some(path.to_string());
-        while let Some(p) = next.take() {
-            let v = self.send(Method::GET, &p, None, eventual)?;
-            if let Some(items) = v["value"].as_array() {
-                out.extend(items.iter().cloned());
-            }
-            next = v["@odata.nextLink"].as_str().map(str::to_string);
-            if next.is_some() && out.len() >= MAX_ITEMS {
-                return Ok((out, true));
-            }
-        }
-        Ok((out, false))
+        collect_pages(path, |p| self.send(Method::GET, p, None, eventual))
     }
 
     pub fn post(&self, path: &str, body: &Value) -> Result<Value> {
@@ -163,6 +151,25 @@ impl Graph {
     /// The full URL of an object in `collection`, for an `@odata.id` reference.
     pub fn object_url(&self, collection: &str, id: &str) -> String {
         format!("{}/{collection}/{id}", self.base)
+    }
+}
+
+/// The items of a paged collection, fetching the page at `first` with `fetch` and then each one
+/// its `@odata.nextLink` names, until there are no more or [`MAX_ITEMS`] have been read. Also
+/// says whether it stopped with more to come.
+pub(crate) fn collect_pages(first: &str, mut fetch: impl FnMut(&str) -> Result<Value>) -> Result<(Vec<Value>, bool)> {
+    let mut out = Vec::new();
+    let mut url = first.to_string();
+    loop {
+        let mut page = fetch(&url)?;
+        if let Some(Value::Array(items)) = page.get_mut("value").map(Value::take) {
+            out.extend(items);
+        }
+        let Some(next) = page["@odata.nextLink"].as_str() else { return Ok((out, false)) };
+        if out.len() >= MAX_ITEMS {
+            return Ok((out, true));
+        }
+        url = next.to_string();
     }
 }
 
@@ -336,6 +343,33 @@ mod tests {
 
         let body = r#"{"error":{"message":"Ex1|Microsoft.Exchange.Data.StoragePermanentException|Something else broke."}}"#;
         assert!(!ApiError::new(Api::Exchange, StatusCode::INTERNAL_SERVER_ERROR, body).not_found());
+    }
+
+    #[test]
+    fn follows_pages_until_the_last_or_the_limit() {
+        let page = |n: usize, more: bool| {
+            let mut v = serde_json::json!({ "value": vec![n; 3] });
+            if more {
+                v["@odata.nextLink"] = serde_json::json!(format!("page{}", n + 1));
+            }
+            v
+        };
+        let mut asked = Vec::new();
+        let (items, capped) = collect_pages("page0", |url| {
+            asked.push(url.to_string());
+            let n = asked.len() - 1;
+            Ok(page(n, n < 2))
+        })
+        .unwrap();
+        assert_eq!(asked, ["page0", "page1", "page2"]);
+        assert_eq!((items.len(), capped), (9, false));
+
+        // A page with nothing in it, as an empty reply reads, ends the list.
+        assert_eq!(collect_pages("x", |_| Ok(Value::Null)).unwrap().0.len(), 0);
+
+        let big = |_: &str| Ok(serde_json::json!({ "value": vec![0; 1000], "@odata.nextLink": "more" }));
+        let (items, capped) = collect_pages("first", big).unwrap();
+        assert_eq!((items.len(), capped), (MAX_ITEMS, true));
     }
 
     #[test]

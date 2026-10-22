@@ -31,6 +31,12 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
   the workflow carries on as it would after any failure.
 - Settings, Remote Servers and the saved sign-in are saved whole or not at all, so a crash or
   power cut while saving can no longer leave a cut-off file behind.
+- New User, Import users and Onboard user now check user names and passwords the same way,
+  against what Microsoft Entra ID accepts: the user name's characters, and a password of 8 to
+  256 characters with three of upper case, lower case, digits and symbols. New User and Import
+  users only checked the length before, so Microsoft refused some users only once they were
+  sent. Reset password checks the length in characters rather than bytes, so a password of
+  four accented letters is no longer taken for eight characters.
 - If the app can't set up its connection to Microsoft (for example, when the system's security
   settings can't be loaded), it says so rather than closing.
 
@@ -43,6 +49,9 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
   worded.
 - The results list's filter, sort and selection are kept in a part of their own, with tests,
   and the CSV and MariaDB exports build their table the same way.
+- Shared code replaces copies: one device code sign-in for signing in and for approving
+  permissions, one way of following pages of results for Graph and Exchange Online (which no
+  longer copies every object it reads), and one search for the user, group and device pickers.
 
 ## [1.5.0] - 2026-10-21
 

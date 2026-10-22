@@ -8,7 +8,7 @@
 use crate::app::App;
 use crate::auth::Api;
 use crate::dialogs::{Dialog, Field, Form, PickItem, Picker};
-use crate::graph::{Graph, MAX_ITEMS};
+use crate::graph::{collect_pages, Graph};
 use crate::i18n::{t, tf};
 use crate::model::{s, yes_no, Node};
 use crate::ops::civil_from_days;
@@ -35,19 +35,8 @@ impl Graph {
         let anchor = format!("UPN:{ANCHOR}@{domain}");
         let headers = [("X-AnchorMailbox", anchor.as_str()), ("X-ResponseFormat", "json")];
         let body = json!({ "CmdletInput": { "CmdletName": cmdlet, "Parameters": params } });
-        let mut url = format!("{}/adminapi/beta/{tenant}/InvokeCommand", self.exchange_endpoint());
-        let mut out = Vec::new();
-        loop {
-            let v = self.send_to(Api::Exchange, Method::POST, &url, cmdlet, Some(&body), &headers)?;
-            if let Some(items) = v["value"].as_array() {
-                out.extend(items.iter().cloned());
-            }
-            let Some(next) = v["@odata.nextLink"].as_str() else { return Ok((out, false)) };
-            if out.len() >= MAX_ITEMS {
-                return Ok((out, true));
-            }
-            url = next.to_string();
-        }
+        let url = format!("{}/adminapi/beta/{tenant}/InvokeCommand", self.exchange_endpoint());
+        collect_pages(&url, |url| self.send_to(Api::Exchange, Method::POST, url, cmdlet, Some(&body), &headers))
     }
 
     /// The tenant ID and initial (onmicrosoft.com) domain, read once from Graph.

@@ -9,6 +9,7 @@ use crate::graph::{api_error, enc, odata_str, ApiError};
 use crate::i18n::{self, t, tf};
 use crate::model::{Node, s};
 use crate::ops::{generate_password, is_guid};
+use crate::validate::{alias_problem, is_usage_location, password_problem};
 use anyhow::Context;
 use eframe::egui::{self, Align, Layout, RichText};
 use egui_extras::{Column, TableBuilder};
@@ -230,15 +231,17 @@ pub fn parse_users(table: &Table, domains: &[String], existing: &HashSet<String>
                 Some(t("csv.no_upn"))
             } else if alias.is_empty() || domain.is_empty() || domain.contains('@') || upn.contains(char::is_whitespace) {
                 Some(tf("csv.bad_upn", &[("upn", &upn)]))
+            } else if let Some(problem) = alias_problem(alias) {
+                Some(problem)
             } else if !verified.is_empty() && !verified.contains(&domain.to_lowercase()) {
                 Some(tf("csv.unverified_domain", &[("domain", &domain)]))
             } else if existing.contains(&upn.to_lowercase()) {
                 Some(t("csv.user_exists"))
             } else if let Some(first) = seen.get(&upn.to_lowercase()) {
                 Some(tf("csv.same_upn", &[("line", first)]))
-            } else if password.chars().count() < 8 {
-                Some(t("csv.short_password"))
-            } else if !usage.is_empty() && (usage.len() != 2 || !usage.chars().all(|c| c.is_ascii_alphabetic())) {
+            } else if let Some(problem) = password_problem(&password) {
+                Some(problem)
+            } else if !is_usage_location(&usage) {
                 Some(tf("csv.bad_usage_location", &[("usage", &usage)]))
             } else if nickname.is_empty() {
                 Some(t("csv.no_nickname"))
@@ -548,7 +551,6 @@ impl App {
         let values: Vec<String> = members.into_iter().map(|m| m.value).collect();
         let n = jobs.len();
         let group_id = s(&group, "id");
-        let endpoint = self.settings.graph_endpoint.clone();
         let run = move |app: &mut App, dialog: u64| {
             log::info!("Adding {n} members to {name} from CSV");
             app.spawn(
@@ -559,7 +561,7 @@ impl App {
                         .into_iter()
                         .map(|(i, value)| {
                             let added = find_user(g, &value).and_then(|id| {
-                                let body = json!({ "@odata.id": format!("{endpoint}/v1.0/directoryObjects/{id}") });
+                                let body = json!({ "@odata.id": g.object_url("directoryObjects", &id) });
                                 match g.post(&path, &body) {
                                     Ok(_) => Ok(t("bulk.added")),
                                     Err(e) if api_error(&e).is_some_and(ApiError::already_exists) => Ok(t("bulk.already_member")),
@@ -848,7 +850,7 @@ mod tests {
                 "A user with this name already exists",
                 "Same user principal name as line 2",
                 "Usage location 'GBR' is not a two-letter country code",
-                "Password must be at least 8 characters",
+                "The password must be 8 to 256 characters.",
                 "Enabled must be Yes or No",
             ]
         );

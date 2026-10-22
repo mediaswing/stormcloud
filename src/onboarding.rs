@@ -7,6 +7,7 @@ use crate::graph::{api_error, enc, ApiError, Graph};
 use crate::i18n::{t, tf};
 use crate::model::{group_type, s, sku_name, Node};
 use crate::ops::generate_password;
+use crate::validate::{alias_problem, is_usage_location, password_problem};
 use crate::workflow::{self, Loadable, Shared, State, Step};
 use eframe::egui::{self, RichText};
 use serde_json::{json, Value};
@@ -90,38 +91,6 @@ pub fn classify_group(v: &Value) -> GroupChoice {
 
 /// Why a user name can't be used, if it can't. Entra allows letters, digits and `' . - _ ! # ^ ~`,
 /// not starting or ending with a full stop.
-pub fn alias_problem(alias: &str) -> Option<String> {
-    if alias.is_empty() {
-        return Some(t("onboard.no_alias"));
-    }
-    if let Some(c) = alias.chars().find(|c| !(c.is_ascii_alphanumeric() || "'.-_!#^~".contains(*c))) {
-        return Some(tf("onboard.alias_char", &[("char", &c)]));
-    }
-    if alias.starts_with('.') || alias.ends_with('.') || alias.contains("..") {
-        return Some(t("onboard.alias_dots"));
-    }
-    None
-}
-
-/// Why Microsoft Entra ID would refuse a password, if it would: it must be 8 to 256 characters
-/// with three of upper case, lower case, digits and symbols.
-pub fn password_problem(p: &str) -> Option<String> {
-    let n = p.chars().count();
-    let classes = [
-        p.chars().any(|c| c.is_ascii_uppercase()),
-        p.chars().any(|c| c.is_ascii_lowercase()),
-        p.chars().any(|c| c.is_ascii_digit()),
-        p.chars().any(|c| !c.is_ascii_alphanumeric()),
-    ];
-    if !(8..=256).contains(&n) {
-        Some(t("onboard.password_length"))
-    } else if classes.iter().filter(|c| **c).count() < 3 {
-        Some(t("onboard.password_classes"))
-    } else {
-        None
-    }
-}
-
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum UpnCheck {
     Checking,
@@ -212,7 +181,7 @@ impl Onboarding {
             Some(p)
         } else if self.domain().is_empty() || self.domain().contains(['@', ' ']) {
             Some(t("onboard.no_domain"))
-        } else if !crate::ops::is_usage_location(usage) {
+        } else if !is_usage_location(usage) {
             Some(t("onboard.bad_usage_location"))
         } else {
             password_problem(&self.password)
@@ -752,20 +721,6 @@ mod tests {
         assert!(roles.allowed && !roles.selected, "role-assignable groups must not be ticked automatically");
         assert!(m365.allowed && m365.selected);
         assert_eq!(m365.note, "Assigns licences");
-    }
-
-    #[test]
-    fn checks_names_and_passwords() {
-        assert_eq!(alias_problem("ann.lee"), None);
-        assert!(alias_problem("ann lee").is_some());
-        assert!(alias_problem("ann@contoso.com").is_some());
-        assert!(alias_problem(".ann").is_some());
-        assert!(password_problem("short1A").is_some());
-        assert!(password_problem("alllowercase").is_some());
-        assert_eq!(password_problem("Lower-and-1"), None);
-        for _ in 0..50 {
-            assert_eq!(password_problem(&generate_password()), None);
-        }
     }
 
     fn wizard() -> Onboarding {

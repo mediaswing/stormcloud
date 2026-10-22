@@ -23,6 +23,7 @@ mod security;
 mod servers;
 mod sheets;
 mod update;
+mod validate;
 mod workflow;
 
 use std::process::ExitCode;

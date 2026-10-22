@@ -7,6 +7,7 @@ use crate::graph::{odata_str, Graph};
 use crate::i18n::{t, tf};
 use crate::model::{s, sku_name, Node};
 use crate::sheets::Sheet;
+use crate::validate::{alias_problem, is_usage_location, password_length_problem, password_problem};
 use eframe::egui::{Key, KeyboardShortcut, Modifiers};
 use serde_json::{json, Value};
 
@@ -361,15 +362,15 @@ impl App {
                     _ => f.text("domain"),
                 };
                 let alias = f.text("alias");
-                if alias.contains('@') || alias.contains(' ') {
-                    return Err(t("user.bad_alias"));
+                if let Some(problem) = alias_problem(&alias) {
+                    return Err(problem);
                 }
                 if domain.is_empty() {
                     return Err(tf("form.required", &[("field", &t("field.domain"))]));
                 }
                 let password = f.raw("password");
-                if password.len() < 8 {
-                    return Err(t("user.short_password"));
+                if let Some(problem) = password_problem(&password) {
+                    return Err(problem);
                 }
                 if !is_usage_location(&f.text("usageLocation")) {
                     return Err(t("user.bad_usage_location"));
@@ -413,8 +414,8 @@ impl App {
             .field(Field::check("force", &t("field.force_change"), true))
             .on_submit(move |app, f| {
                 let password = f.raw("password");
-                if password.len() < 8 {
-                    return Err(t("user.short_password"));
+                if let Some(problem) = password_length_problem(&password) {
+                    return Err(problem);
                 }
                 let body = json!({ "passwordProfile": {
                     "password": password,
@@ -530,14 +531,22 @@ impl App {
 
     pub fn add_member(&mut self, group_id: &str, member_id: &str, after: impl FnOnce(&mut App) + Send + 'static) {
         let path = format!("/groups/{group_id}/members/$ref");
-        let body = json!({ "@odata.id": format!("{}/v1.0/directoryObjects/{member_id}", self.settings.graph_endpoint) });
-        self.mutate(&t("task.add_member"), move |g| g.post(&path, &body).map(|_| ()), after);
+        let member_id = member_id.to_string();
+        self.mutate(
+            &t("task.add_member"),
+            move |g| g.post(&path, &json!({ "@odata.id": g.object_url("directoryObjects", &member_id) })).map(|_| ()),
+            after,
+        );
     }
 
     pub fn add_owner(&mut self, coll: &str, obj_id: &str, user_id: &str, after: impl FnOnce(&mut App) + Send + 'static) {
         let path = format!("/{coll}/{obj_id}/owners/$ref");
-        let body = json!({ "@odata.id": format!("{}/v1.0/directoryObjects/{user_id}", self.settings.graph_endpoint) });
-        self.mutate(&t("task.add_owner"), move |g| g.post(&path, &body).map(|_| ()), after);
+        let user_id = user_id.to_string();
+        self.mutate(
+            &t("task.add_owner"),
+            move |g| g.post(&path, &json!({ "@odata.id": g.object_url("directoryObjects", &user_id) })).map(|_| ()),
+            after,
+        );
     }
 
     pub fn assign_role(&mut self, principal_id: &str, role_id: &str, after: impl FnOnce(&mut App) + Send + 'static) {
@@ -674,59 +683,41 @@ pub fn app_roles(sp: &Value) -> Vec<PickItem> {
     roles
 }
 
-fn search_users(g: &Graph, q: &str) -> anyhow::Result<Vec<PickItem>> {
-    let select = "$select=id,displayName,userPrincipalName&$top=50";
-    let path = if q.is_empty() {
-        format!("/users?{select}")
-    } else {
-        let q = odata_str(q);
-        format!("/users?$filter=startswith(displayName,'{q}') or startswith(userPrincipalName,'{q}') or startswith(mail,'{q}')&{select}")
-    };
-    Ok(g.get(&path)?["value"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|u| PickItem { id: s(&u, "id"), label: format!("👤 {}", s(&u, "displayName")), detail: s(&u, "userPrincipalName") })
+/// The path that asks for up to `top` objects of `collection` with `select`ed properties whose
+/// `fields` start with `q`, or any objects when `q` is empty.
+fn search_path(collection: &str, select: &str, fields: &[&str], top: u32, q: &str) -> String {
+    let select = format!("$select={select}&$top={top}");
+    if q.is_empty() {
+        return format!("/{collection}?{select}");
+    }
+    let q = odata_str(q);
+    let filter: Vec<String> = fields.iter().map(|f| format!("startswith({f},'{q}')")).collect();
+    format!("/{collection}?$filter={}&{select}", filter.join(" or "))
+}
+
+/// Picker items for what `path` finds, labelled with `icon` and the display name, and with the
+/// property `detail` as their detail.
+fn search(g: &Graph, path: &str, icon: &str, detail: &str) -> anyhow::Result<Vec<PickItem>> {
+    let mut found = g.get(path)?;
+    let Some(Value::Array(items)) = found.get_mut("value").map(Value::take) else { return Ok(Vec::new()) };
+    Ok(items
+        .iter()
+        .map(|v| PickItem { id: s(v, "id"), label: format!("{icon} {}", s(v, "displayName")), detail: s(v, detail) })
         .collect())
+}
+
+fn search_users(g: &Graph, q: &str) -> anyhow::Result<Vec<PickItem>> {
+    let fields = ["displayName", "userPrincipalName", "mail"];
+    search(g, &search_path("users", "id,displayName,userPrincipalName", &fields, 50, q), "👤", "userPrincipalName")
 }
 
 fn search_groups(g: &Graph, q: &str) -> anyhow::Result<Vec<PickItem>> {
-    let select = "$select=id,displayName,mail,isAssignableToRole&$top=50";
-    let path = if q.is_empty() {
-        format!("/groups?{select}")
-    } else {
-        let q = odata_str(q);
-        format!("/groups?$filter=startswith(displayName,'{q}') or startswith(mail,'{q}')&{select}")
-    };
-    Ok(g.get(&path)?["value"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|v| PickItem { id: s(&v, "id"), label: format!("👥 {}", s(&v, "displayName")), detail: s(&v, "mail") })
-        .collect())
+    let path = search_path("groups", "id,displayName,mail,isAssignableToRole", &["displayName", "mail"], 50, q);
+    search(g, &path, "👥", "mail")
 }
 
 fn search_devices(g: &Graph, q: &str) -> anyhow::Result<Vec<PickItem>> {
-    let select = "$select=id,displayName,operatingSystem&$top=25";
-    let path = if q.is_empty() {
-        format!("/devices?{select}")
-    } else {
-        format!("/devices?$filter=startswith(displayName,'{}')&{select}", odata_str(q))
-    };
-    Ok(g.get(&path)?["value"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|v| PickItem { id: s(&v, "id"), label: format!("💻 {}", s(&v, "displayName")), detail: s(&v, "operatingSystem") })
-        .collect())
-}
-
-/// Blank, or a two-letter country code such as GB.
-pub fn is_usage_location(s: &str) -> bool {
-    s.is_empty() || s.len() == 2 && s.chars().all(|c| c.is_ascii_alphabetic())
+    search(g, &search_path("devices", "id,displayName,operatingSystem", &["displayName"], 25, q), "💻", "operatingSystem")
 }
 
 pub fn is_guid(s: &str) -> bool {
@@ -783,6 +774,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn search_paths() {
+        let fields = ["displayName", "userPrincipalName", "mail"];
+        assert_eq!(
+            search_path("users", "id,displayName,userPrincipalName", &fields, 50, "O'Neil"),
+            "/users?$filter=startswith(displayName,'O%27%27Neil') or startswith(userPrincipalName,'O%27%27Neil') \
+             or startswith(mail,'O%27%27Neil')&$select=id,displayName,userPrincipalName&$top=50"
+        );
+        assert_eq!(search_path("devices", "id,displayName", &["displayName"], 25, ""), "/devices?$select=id,displayName&$top=25");
+    }
+
+    #[test]
     fn civil_dates() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(19_723), (2024, 1, 1));
@@ -832,12 +834,6 @@ mod tests {
         assert!(crate::model::is_admin_tool(&app("14d82eec-204b-4c2f-b7e8-296a70dab67e"), ""));
         assert!(!crate::model::is_admin_tool(&app("11111111-2222-3333-4444-555555555555"), own));
         assert!(!crate::model::is_admin_tool(&json!({}), ""));
-    }
-
-    #[test]
-    fn usage_locations() {
-        assert!(is_usage_location("") && is_usage_location("gb"));
-        assert!(!is_usage_location("GBR") && !is_usage_location("G1"));
     }
 
     #[test]

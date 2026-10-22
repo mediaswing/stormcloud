@@ -20,6 +20,9 @@ use std::thread;
 
 pub type Update = Box<dyn FnOnce(&mut App) + Send>;
 
+/// Who is signed in, as far as the app needs to know.
+const ME: &str = "/me?$select=displayName,userPrincipalName";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
     Tree,
@@ -414,7 +417,7 @@ impl App {
         let attempt = self.signin_gen;
         if graph.auth.has_refresh_token() {
             self.status = t("status.signing_in");
-            self.spawn(t("status.signing_in"), |g| g.get("/me?$select=displayName,userPrincipalName"), move |app, r| {
+            self.spawn(t("status.signing_in"), |g| g.get(ME), move |app, r| {
                 match r {
                     Ok(me) => app.signed_in_as(me),
                     Err(_) => app.device_code(attempt),
@@ -426,43 +429,60 @@ impl App {
     }
 
     fn device_code(&mut self, attempt: u64) {
+        let current = move |app: &App| attempt == app.signin_gen;
+        self.run_device_code(Api::Graph, Vec::new(), false, current, |app, r| match r {
+            Ok(()) => app.load_profile(),
+            Err(e) => app.error(&t("signin.title"), e),
+        });
+    }
+
+    /// A device code sign-in asking for the scopes on `api` plus `extra`: shows the code, waits
+    /// for it to be entered, then gives `done` the outcome. `approval` when it is only to approve
+    /// more permissions. Nothing more is done once `current` says the attempt was overtaken, by
+    /// being cancelled or by signing out.
+    fn run_device_code(
+        &mut self,
+        api: Api,
+        extra: Vec<String>,
+        approval: bool,
+        current: impl Fn(&App) -> bool + Copy + Send + 'static,
+        done: impl FnOnce(&mut App, anyhow::Result<()>) + Send + 'static,
+    ) {
+        let title = t(if approval { "scopes.approve_title" } else { "signin.title" });
         self.status = t("status.requesting_code");
-        self.spawn_auth(|a| a.start_device_code(Api::Graph, &[]), move |app, r| {
-            if attempt != app.signin_gen {
+        self.spawn_auth(move |a| a.start_device_code(api, &extra), move |app, r| {
+            if !current(app) {
                 return;
             }
             let dc = match r {
                 Ok(dc) => dc,
-                Err(e) => return app.error(&t("signin.title"), e),
+                Err(e) => return app.error(&title, e),
             };
             let id = app.push(Dialog::DeviceCode {
                 message: dc.message.clone(),
                 uri: dc.verification_uri.clone(),
                 code: dc.user_code.clone(),
-                approval: false,
+                approval,
                 cancelled: dc.cancelled.clone(),
             });
-            app.status = t("status.waiting_signin");
+            app.status = t(if approval { "status.waiting_approval" } else { "status.waiting_signin" });
             app.spawn_auth(
                 move |a| a.poll_device_code(&dc),
                 move |app, r| {
                     app.close_dialog(id);
-                    if attempt != app.signin_gen {
-                        return;
-                    }
-                    match r {
-                        Ok(()) => app.spawn(
-                            t("status.loading_profile"),
-                            |g| g.get("/me?$select=displayName,userPrincipalName"),
-                            |app, r| match r {
-                                Ok(me) => app.signed_in_as(me),
-                                Err(e) => app.error(&t("signin.title"), e),
-                            },
-                        ),
-                        Err(e) => app.error(&t("signin.title"), e),
+                    if current(app) {
+                        done(app, r);
                     }
                 },
             );
+        });
+    }
+
+    /// Reads who is signed in, and carries on as them.
+    fn load_profile(&mut self) {
+        self.spawn(t("status.loading_profile"), |g| g.get(ME), |app, r| match r {
+            Ok(me) => app.signed_in_as(me),
+            Err(e) => app.error(&t("signin.title"), e),
         });
     }
 
@@ -533,54 +553,19 @@ impl App {
         let (attempt, session) = (self.approval_gen, self.signin_gen);
         let current = move |app: &App| attempt == app.approval_gen && session == app.signin_gen;
         let feature = feature.to_string();
-        let ask = extra.clone();
-        self.status = t("status.requesting_code");
-        self.spawn_auth(move |a| a.start_device_code(api, &ask), move |app, r| {
-            if !current(app) {
-                return;
+        let added = extra.clone();
+        self.run_device_code(api, extra, true, current, move |app, r| match r {
+            Ok(()) => {
+                if !added.is_empty() {
+                    if let Some(g) = &app.graph {
+                        g.auth.add_scopes(&added);
+                    }
+                    app.save_scopes(&added);
+                }
+                // An administrator other than the person signed in may have approved them.
+                app.load_profile();
             }
-            let dc = match r {
-                Ok(dc) => dc,
-                Err(e) => return app.error(&t("scopes.approve_title"), e),
-            };
-            let id = app.push(Dialog::DeviceCode {
-                message: dc.message.clone(),
-                uri: dc.verification_uri.clone(),
-                code: dc.user_code.clone(),
-                approval: true,
-                cancelled: dc.cancelled.clone(),
-            });
-            app.status = t("status.waiting_approval");
-            app.spawn_auth(
-                move |a| a.poll_device_code(&dc),
-                move |app, r| {
-                    app.close_dialog(id);
-                    if !current(app) {
-                        return;
-                    }
-                    match r {
-                        Ok(()) => {
-                            if !extra.is_empty() {
-                                if let Some(g) = &app.graph {
-                                    g.auth.add_scopes(&extra);
-                                }
-                                app.save_scopes(&extra);
-                            }
-                            // An administrator other than the person signed in may have approved them.
-                            app.spawn(t("status.loading_profile"), |g| g.get("/me?$select=displayName,userPrincipalName"), |app, r| {
-                                match r {
-                                    Ok(me) => app.signed_in_as(me),
-                                    Err(e) => app.error(&t("signin.title"), e),
-                                }
-                            });
-                        }
-                        Err(e) => app.error(
-                            &t("scopes.approve_title"),
-                            tf("scopes.not_added", &[("feature", &feature), ("error", &e)]),
-                        ),
-                    }
-                },
-            );
+            Err(e) => app.error(&t("scopes.approve_title"), tf("scopes.not_added", &[("feature", &feature), ("error", &e)])),
         });
     }
 

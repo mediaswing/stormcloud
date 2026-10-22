@@ -432,8 +432,6 @@ const ENGLISH: &[(&str, &str)] = &[
         "user.new_intro",
         "Usage location is a two-letter country code (e.g. GB) and is required before licences can be assigned.",
     ),
-    ("user.bad_alias", "User name must not contain spaces or @; choose the domain separately."),
-    ("user.short_password", "Password must be at least 8 characters."),
     ("user.bad_usage_location", "Usage location must be a two-letter country code, such as GB."),
     ("user.creating", "Creating user…"),
     ("user.created_title", "User created"),
@@ -717,7 +715,6 @@ const ENGLISH: &[(&str, &str)] = &[
     ("csv.unverified_domain", "{domain} is not a verified domain of this tenant"),
     ("csv.user_exists", "A user with this name already exists"),
     ("csv.same_upn", "Same user principal name as line {line}"),
-    ("csv.short_password", "Password must be at least 8 characters"),
     ("csv.bad_usage_location", "Usage location '{usage}' is not a two-letter country code"),
     ("csv.no_nickname", "Mail nickname is missing"),
     ("csv.bad_enabled", "Enabled must be Yes or No"),
@@ -1997,7 +1994,7 @@ mod tests {
         assert_eq!(english_map().len(), ENGLISH.len(), "a key appears twice in ENGLISH");
     }
 
-    const SOURCES: [&str; 19] = [
+    const SOURCES: [&str; 20] = [
         include_str!("app.rs"),
         include_str!("auth.rs"),
         include_str!("bulk.rs"),
@@ -2015,6 +2012,7 @@ mod tests {
         include_str!("servers.rs"),
         include_str!("sheets.rs"),
         include_str!("update.rs"),
+        include_str!("validate.rs"),
         include_str!("workflow.rs"),
         include_str!("main.rs"),
     ];
