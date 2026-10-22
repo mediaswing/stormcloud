@@ -12,6 +12,7 @@ mod exchange;
 mod graph;
 mod i18n;
 mod language;
+mod listview;
 mod logging;
 mod model;
 mod offboarding;

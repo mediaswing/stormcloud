@@ -9,7 +9,7 @@ use crate::app::App;
 use crate::config::Settings;
 use crate::dialogs::{Dialog, Field, Form};
 use crate::i18n::{self, t, tf};
-use crate::model::{Node, s};
+use crate::model::Node;
 use anyhow::Context;
 use mysql::prelude::Queryable;
 use std::time::Duration;
@@ -191,22 +191,13 @@ impl App {
     }
 
     fn run_database_export(&mut self, node: Node, target: Target) {
-        let cols = node.columns();
-        let (id_header, id_key) = if node == Node::Licences { ("SKU ID", "skuId") } else { ("Object ID", "id") };
-        // The column names and values are in English whatever the language of the interface, so
-        // the table reads the same, and exporting again updates it rather than adding columns.
-        let (columns, rows) = i18n::in_english(|| {
-            let columns: Vec<String> = std::iter::once(id_header.to_string())
-                .chain(cols.iter().map(|c| t(c.title)))
-                .map(|title| column_name(&title))
-                .collect();
-            let rows: Vec<Vec<String>> = self
-                .view_rows()
-                .into_iter()
-                .map(|v| std::iter::once(s(v, id_key)).chain(cols.iter().map(|c| (c.get)(v))).collect())
-                .collect();
-            (columns, rows)
-        });
+        // The object ID goes first, as the table's primary key. In English, so exporting again
+        // updates the table rather than adding columns.
+        let exported = node.export(&self.view_rows());
+        let columns: Vec<String> =
+            std::iter::once(exported.id_header).chain(exported.headers.iter().map(String::as_str)).map(column_name).collect();
+        let rows: Vec<Vec<String>> =
+            exported.ids.into_iter().zip(exported.rows).map(|(id, row)| std::iter::once(id).chain(row).collect()).collect();
         let list = node.list_name();
         let place = (target.database.clone(), target.table.clone(), target.host.clone());
         let args: [(&str, &dyn std::fmt::Display); 4] =

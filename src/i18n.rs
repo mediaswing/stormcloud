@@ -1997,7 +1997,7 @@ mod tests {
         assert_eq!(english_map().len(), ENGLISH.len(), "a key appears twice in ENGLISH");
     }
 
-    const SOURCES: [&str; 18] = [
+    const SOURCES: [&str; 19] = [
         include_str!("app.rs"),
         include_str!("auth.rs"),
         include_str!("bulk.rs"),
@@ -2006,6 +2006,7 @@ mod tests {
         include_str!("exchange.rs"),
         include_str!("graph.rs"),
         include_str!("language.rs"),
+        include_str!("listview.rs"),
         include_str!("model.rs"),
         include_str!("offboarding.rs"),
         include_str!("onboarding.rs"),

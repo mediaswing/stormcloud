@@ -377,23 +377,19 @@ impl App {
     /// imported again.
     pub fn export_list(&mut self) {
         let node = self.node;
-        let cols = node.columns();
-        let id_key = if node == Node::Licences { "skuId" } else { "id" };
-        let (headers, rows, name) = i18n::in_english(|| {
-            let mut headers: Vec<String> = cols.iter().map(|c| t(c.title)).collect();
-            headers.push(if node == Node::Licences { "SKU ID" } else { "Object ID" }.to_string());
-            let rows: Vec<Vec<String>> = self
-                .view_rows()
-                .into_iter()
-                .map(|v| {
-                    let mut row: Vec<String> = cols.iter().map(|c| (c.get)(v)).collect();
-                    row.push(s(v, id_key));
-                    row
-                })
-                .collect();
-            (headers, rows, format!("{}.csv", node.list_name()))
-        });
-        let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+        let exported = node.export(&self.view_rows());
+        // The object ID goes last, after the columns as shown.
+        let headers: Vec<&str> = exported.headers.iter().map(String::as_str).chain([exported.id_header]).collect();
+        let rows: Vec<Vec<String>> = exported
+            .rows
+            .into_iter()
+            .zip(exported.ids)
+            .map(|(mut row, id)| {
+                row.push(id);
+                row
+            })
+            .collect();
+        let name = i18n::in_english(|| format!("{}.csv", node.list_name()));
         if let Some(path) = self.save_csv(&t("csv.export_title"), &name, &headers, &rows) {
             log::info!("Exported {} {node:?} to {}", rows.len(), path.display());
             let args: [(&str, &dyn std::fmt::Display); 3] = [("count", &rows.len()), ("list", &node.list_name()), ("path", &path.display())];

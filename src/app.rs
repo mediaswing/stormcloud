@@ -5,6 +5,7 @@ use crate::config::Settings;
 use crate::dialogs::{Dialog, DialogEntry};
 use crate::graph::Graph;
 use crate::i18n::{t, tf};
+use crate::listview::ListView;
 use crate::model::{Node, Source, TREE};
 use crate::ops::{item_actions, node_actions, Act};
 use eframe::egui::{
@@ -70,14 +71,8 @@ pub struct App {
     errors: HashMap<Node, String>,
     /// Lists that stopped at [`MAX_ITEMS`] with more objects to come.
     truncated: HashSet<Node>,
-    filter: String,
-    sort: Option<(usize, bool)>,
-    view: Vec<usize>,
-    view_dirty: bool,
-    sel: Option<usize>,
-    /// The selected object's ID, taken before the current list's data changed, as the view's
-    /// indices no longer match the data until it is rebuilt.
-    sel_before_change: Option<Option<Value>>,
+    /// The current node's objects as the results list shows them.
+    list: ListView,
 
     pane: Pane,
     focus_pane: Option<Pane>,
@@ -180,12 +175,7 @@ impl App {
             loading: HashSet::new(),
             errors: HashMap::new(),
             truncated: HashSet::new(),
-            filter: String::new(),
-            sort: None,
-            view: Vec::new(),
-            view_dirty: true,
-            sel: None,
-            sel_before_change: None,
+            list: ListView::new(),
             pane: Pane::Tree,
             focus_pane: Some(Pane::Tree),
             scroll_to_sel: false,
@@ -248,7 +238,7 @@ impl App {
     pub fn language_changed(&mut self) {
         self.data.insert(Node::Root, child_rows(Node::Root));
         self.data.insert(Node::Exchange, child_rows(Node::Exchange));
-        self.view_dirty = true;
+        self.list.dirty = true;
     }
 
     pub fn error(&mut self, title: &str, err: impl std::fmt::Display) {
@@ -412,8 +402,7 @@ impl App {
         self.loading.clear();
         self.errors.clear();
         self.truncated.clear();
-        self.sel_before_change = None;
-        self.view_dirty = true;
+        self.list.forget_objects();
     }
 
     pub fn sign_in(&mut self) {
@@ -648,11 +637,7 @@ impl App {
         }
         log::debug!("Console node selected: {node:?}");
         self.node = node;
-        self.filter.clear();
-        self.sort = None;
-        self.sel = None;
-        self.sel_before_change = None;
-        self.view_dirty = true;
+        self.list.reset();
         if node.endpoint().is_some() && !self.data.contains_key(&node) {
             self.load(node);
         }
@@ -717,7 +702,7 @@ impl App {
                     }
                 }
                 if app.node == node {
-                    app.view_dirty = true;
+                    app.list.dirty = true;
                 }
             },
         );
@@ -741,8 +726,8 @@ impl App {
 
     /// Remembers the selection before the data for `node` changes, while the view still matches it.
     fn data_changing(&mut self, node: Node) {
-        if self.node == node && self.sel_before_change.is_none() {
-            self.sel_before_change = Some(self.selected().map(|v| v["id"].clone()));
+        if self.node == node {
+            self.list.objects_changing(rows_of(&self.data, node));
         }
     }
 
@@ -765,7 +750,7 @@ impl App {
             None => rows.push(obj),
         }
         if self.node == node {
-            self.view_dirty = true;
+            self.list.dirty = true;
         }
     }
 
@@ -775,67 +760,31 @@ impl App {
             rows.retain(|r| r["id"] != id);
         }
         if self.node == node {
-            self.view_dirty = true;
+            self.list.dirty = true;
         }
     }
 
     /// Whether a row is left out of the list whatever the filter, as admin tools are by default.
     fn hidden(&self, v: &Value) -> bool {
-        self.node == Node::Applications
-            && !self.show_admin_tools
-            && crate::model::is_admin_tool(v, &self.settings.client_id)
+        hidden(self.node, self.show_admin_tools, &self.settings.client_id, v)
     }
 
     fn rebuild_view(&mut self) {
-        let prev = match self.sel_before_change.take() {
-            Some(prev) => prev,
-            None => self.selected().map(|v| v["id"].clone()),
-        };
-        let old_pos = self.sel;
-        let rows = self.data.get(&self.node).map(Vec::as_slice).unwrap_or(&[]);
-        let cols = self.node.columns();
-        let needle = self.filter.trim().to_lowercase();
-        let mut view: Vec<usize> = (0..rows.len())
-            .filter(|&i| !self.hidden(&rows[i]))
-            .filter(|&i| {
-                needle.is_empty() || cols.iter().any(|c| (c.get)(&rows[i]).to_lowercase().contains(&needle))
-            })
-            .collect();
-        if let Some((ci, asc)) = self.sort
-            && let Some(col) = cols.get(ci) {
-                view.sort_by_cached_key(|&i| {
-                    let text = (col.get)(&rows[i]);
-                    // Sort numeric columns numerically.
-                    (text.parse::<f64>().ok().map(|n| (n * 1000.0) as i64), text.to_lowercase())
-                });
-                if !asc {
-                    view.reverse();
-                }
-            }
-        // When the selected object has gone, select the one now in its place.
-        self.sel = prev
-            .and_then(|id| view.iter().position(|&i| rows[i]["id"] == id))
-            .or(if view.is_empty() { None } else { Some(old_pos.unwrap_or(0).min(view.len() - 1)) });
-        self.view = view;
-        self.view_dirty = false;
+        let (node, show_admin_tools, client_id) = (self.node, self.show_admin_tools, &self.settings.client_id);
+        self.list.rebuild(rows_of(&self.data, node), &node.columns(), |v| hidden(node, show_admin_tools, client_id, v));
     }
 
     /// The objects in the result list, filtered and sorted as shown.
     pub fn view_rows(&self) -> Vec<&Value> {
-        let rows = rows_of(&self.data, self.node);
-        self.view.iter().filter_map(|&i| rows.get(i)).collect()
+        self.list.shown(rows_of(&self.data, self.node))
     }
 
     pub fn selected(&self) -> Option<&Value> {
-        let i = *self.view.get(self.sel?)?;
-        self.data.get(&self.node)?.get(i)
+        self.list.selected(rows_of(&self.data, self.node))
     }
 
     fn set_sel(&mut self, pos: usize) {
-        if self.view.is_empty() {
-            self.sel = None;
-        } else {
-            self.sel = Some(pos.min(self.view.len() - 1));
+        if self.list.select(pos) {
             self.scroll_to_sel = true;
             self.focus_pane = Some(Pane::List);
         }
@@ -881,7 +830,7 @@ impl App {
         if typing {
             // Shortcuts below would clash with editing text (e.g. Delete).
             if self.filter_has_focus(ctx) && pressed(sc(Modifiers::NONE, Key::ArrowDown)) {
-                self.set_sel(self.sel.unwrap_or(0));
+                self.set_sel(self.list.sel.unwrap_or(0));
             }
             return;
         }
@@ -912,8 +861,8 @@ impl App {
         let next = if forward { (i + 1) % n } else { (i + n - 1) % n };
         self.pane = order[next];
         self.focus_pane = Some(self.pane);
-        if self.pane == Pane::List && self.sel.is_none() && !self.view.is_empty() {
-            self.sel = Some(0);
+        if self.pane == Pane::List {
+            self.list.select_first_if_none();
         }
         self.scroll_to_sel = true;
     }
@@ -974,7 +923,7 @@ impl App {
                     ui.separator();
                     ui.checkbox(&mut self.show_actions, t("menu.actions_pane"));
                     if ui.checkbox(&mut self.show_admin_tools, t("menu.show_admin_tools")).changed() {
-                        self.view_dirty = true;
+                        self.list.dirty = true;
                     }
                     ui.separator();
                     ui.label(t("menu.theme"));
@@ -1023,7 +972,7 @@ impl App {
                 ui.separator();
                 let label = ui.label(t("toolbar.filter"));
                 let r = ui.add(
-                    egui::TextEdit::singleline(&mut self.filter)
+                    egui::TextEdit::singleline(&mut self.list.filter)
                         .id(egui::Id::new("filter"))
                         .hint_text(tf("toolbar.filter_hint", &[("list", &self.node.list_name())]))
                         .desired_width(260.0),
@@ -1033,14 +982,14 @@ impl App {
                     self.focus_filter = false;
                 }
                 if r.changed() {
-                    self.view_dirty = true;
+                    self.list.dirty = true;
                 }
                 if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     self.set_sel(0);
                 }
-                if !self.filter.is_empty() && ui.button("✖").on_hover_text(t("toolbar.clear_filter")).clicked() {
-                    self.filter.clear();
-                    self.view_dirty = true;
+                if !self.list.filter.is_empty() && ui.button("✖").on_hover_text(t("toolbar.clear_filter")).clicked() {
+                    self.list.filter.clear();
+                    self.list.dirty = true;
                 }
             });
         });
@@ -1070,10 +1019,10 @@ impl App {
                     ui.separator();
                     if self.node.is_list() {
                         let total = self.data.get(&self.node).map_or(0, |rows| rows.iter().filter(|v| !self.hidden(v)).count());
-                        if self.view.len() == total {
+                        if self.list.len() == total {
                             ui.label(tf("status.count", &[("count", &total), ("list", &self.node.list_name())]));
                         } else {
-                            ui.label(tf("status.shown", &[("shown", &self.view.len()), ("total", &total)]));
+                            ui.label(tf("status.shown", &[("shown", &self.list.len()), ("total", &total)]));
                         }
                     }
                 });
@@ -1183,9 +1132,7 @@ impl App {
                         Key::Enter => {
                             self.pane = Pane::List;
                             self.focus_pane = Some(Pane::List);
-                            if self.sel.is_none() && !self.view.is_empty() {
-                                self.sel = Some(0);
-                            }
+                            self.list.select_first_if_none();
                         }
                         _ => {}
                     }
@@ -1353,15 +1300,15 @@ impl App {
 
     fn result_table(&mut self, ui: &mut egui::Ui) {
         // The tree or a menu may have changed node earlier this frame, after the view was last built.
-        if self.view_dirty {
+        if self.list.dirty {
             self.rebuild_view();
         }
         let cols = self.node.columns();
         let empty = Vec::new();
         let rows = self.data.get(&self.node).unwrap_or(&empty);
-        if self.view.is_empty() {
+        if self.list.is_empty() {
             ui.add_space(8.0);
-            ui.label(t(if self.filter.is_empty() { "central.empty" } else { "central.no_match" }));
+            ui.label(t(if self.list.filter.is_empty() { "central.empty" } else { "central.no_match" }));
             return;
         }
         let text_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
@@ -1377,7 +1324,7 @@ impl App {
             table = table.column(if i + 1 == cols.len() { Column::remainder().at_least(c.width) } else { col });
         }
         if self.scroll_to_sel {
-            if let Some(s) = self.sel {
+            if let Some(s) = self.list.sel {
                 table = table.scroll_to_row(s, None);
             }
             self.scroll_to_sel = false;
@@ -1391,11 +1338,11 @@ impl App {
         // Everything in the rows that a right-click can land on.
         let mut menu_targets: Vec<egui::Response> = Vec::new();
         let mut got_focus = false;
-        let sort = self.sort;
-        let sel = self.sel;
+        let sort = self.list.sort;
+        let sel = self.list.sel;
         let want_focus = self.focus_pane == Some(Pane::List);
         let mut focus_taken = false;
-        let view = &self.view;
+        let view = self.list.rows();
         let titles: Vec<String> = cols.iter().map(|c| t(c.title)).collect();
 
         table
@@ -1489,23 +1436,19 @@ impl App {
             self.pane = Pane::List;
         }
         if let Some(ci) = sort_click {
-            self.sort = match self.sort {
-                Some((c, true)) if c == ci => Some((ci, false)),
-                _ => Some((ci, true)),
-            };
-            self.view_dirty = true;
+            self.list.toggle_sort(ci);
         }
         if let Some(p) = clicked {
-            self.sel = Some(p);
+            self.list.sel = Some(p);
             self.pane = Pane::List;
         }
         if let Some(p) = open {
-            self.sel = Some(p);
+            self.list.sel = Some(p);
             self.run_act(if self.node.is_list() { Act::Properties } else { Act::Open });
         }
         // After the selection, so a right-clicked row's menu is about that row from the start.
         self.context_menus(&menu_targets, MenuFor::Item);
-        let cur = self.sel.unwrap_or(0);
+        let cur = self.list.sel.unwrap_or(0);
         let page = 15;
         match key_action {
             Some(Key::ArrowUp) => self.set_sel(cur.saturating_sub(1)),
@@ -1520,17 +1463,10 @@ impl App {
             _ => {}
         }
         // Type-ahead: jump to the next item whose name starts with the typed character.
-        if let Some(t) = typed.filter(|t| t.trim().len() == 1) {
-            let t = t.to_lowercase();
-            let first = cols[0].get;
-            let n = self.view.len();
-            let found = (1..=n).map(|k| (cur + k) % n).find(|&p| {
-                first(&rows_of(&self.data, self.node)[self.view[p]]).to_lowercase().starts_with(&t)
-            });
-            if let Some(p) = found {
+        if let Some(t) = typed.filter(|t| t.trim().len() == 1)
+            && let Some(p) = self.list.next_starting_with(rows_of(&self.data, self.node), cols[0].get, &t) {
                 self.set_sel(p);
             }
-        }
     }
 
     pub fn open_child(&mut self) {
@@ -1544,6 +1480,12 @@ impl App {
             self.focus_pane = Some(Pane::Tree);
         }
     }
+}
+
+/// Whether a row of `node` is left out of the list whatever the filter, as admin tools are unless
+/// `show_admin_tools`.
+fn hidden(node: Node, show_admin_tools: bool, client_id: &str, v: &Value) -> bool {
+    node == Node::Applications && !show_admin_tools && crate::model::is_admin_tool(v, client_id)
 }
 
 fn rows_of(data: &HashMap<Node, Vec<Value>>, node: Node) -> &[Value] {
@@ -1598,7 +1540,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if self.view_dirty {
+        if self.list.dirty {
             self.rebuild_view();
         }
         if self.dialogs.is_empty() {
@@ -1616,7 +1558,7 @@ impl eframe::App for App {
         self.central(ui);
         self.show_dialogs(&ctx);
         self.run_pending_searches();
-        if self.view_dirty {
+        if self.list.dirty {
             ctx.request_repaint();
         }
         if self.quit {

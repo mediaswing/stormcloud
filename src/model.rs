@@ -233,6 +233,32 @@ impl Node {
     }
 }
 
+/// A list as exported to a file or a database table. It is in English whatever the language of
+/// the interface, so it reads the same, and exporting again updates what was exported before.
+pub struct Export {
+    /// The title of each column shown.
+    pub headers: Vec<String>,
+    /// Each object's cells, under `headers`.
+    pub rows: Vec<Vec<String>>,
+    /// The title of the column that identifies each object, and each object's value in it.
+    pub id_header: &'static str,
+    pub ids: Vec<String>,
+}
+
+impl Node {
+    /// `objects`, which are this node's, as they are exported.
+    pub fn export(self, objects: &[&Value]) -> Export {
+        let cols = self.columns();
+        let (id_header, id_key) = if self == Node::Licences { ("SKU ID", "skuId") } else { ("Object ID", "id") };
+        crate::i18n::in_english(|| Export {
+            headers: cols.iter().map(|c| t(c.title)).collect(),
+            rows: objects.iter().map(|v| cols.iter().map(|c| (c.get)(v)).collect()).collect(),
+            id_header,
+            ids: objects.iter().map(|v| s(v, id_key)).collect(),
+        })
+    }
+}
+
 /// Microsoft's command-line tools that sign in to a tenant as enterprise applications: Microsoft
 /// Graph Command Line Tools (PowerShell), Exchange Online PowerShell, Azure CLI and Azure PowerShell.
 const MICROSOFT_TOOLS: [&str; 4] = [
@@ -382,4 +408,24 @@ pub fn general_fields(v: &Value, keys: &[(&str, &str)]) -> Vec<(String, String)>
             (t(label), text)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn exports_columns_and_ids() {
+        let ann = json!({ "id": "u1", "displayName": "Ann", "userPrincipalName": "ann@contoso.com", "accountEnabled": true });
+        let users = Node::Users.export(&[&ann]);
+        assert_eq!(users.headers[..3], ["Display name", "User principal name", "Enabled"]);
+        assert_eq!(users.rows, [vec!["Ann", "ann@contoso.com", "Yes", "", "", "", ""]]);
+        assert_eq!((users.id_header, users.ids), ("Object ID", vec!["u1".to_string()]));
+
+        let e3 = json!({ "skuId": "sku-1", "skuPartNumber": "SPE_E3", "consumedUnits": 3, "prepaidUnits": { "enabled": 5 } });
+        let licences = Node::Licences.export(&[&e3]);
+        assert_eq!((licences.id_header, licences.ids), ("SKU ID", vec!["sku-1".to_string()]));
+        assert_eq!(licences.rows[0][..5], ["Microsoft 365 E3", "SPE_E3", "3", "5", "2"]);
+    }
 }

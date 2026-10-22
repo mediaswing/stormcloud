@@ -41,6 +41,8 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
   exception type rather than by searching the message shown, so "not found", "already a
   member", "not allowed" and "needs a premium licence" are recognised however the message is
   worded.
+- The results list's filter, sort and selection are kept in a part of their own, with tests,
+  and the CSV and MariaDB exports build their table the same way.
 
 ## [1.5.0] - 2026-10-21
 
