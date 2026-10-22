@@ -125,7 +125,7 @@ everyday words, and use Microsoft's own names for things in Entra ID and
 Exchange Online. The same goes for code comments.
 
 Every label and message the app shows lives in the `ENGLISH` list in
-`src/i18n.rs`, under a key, so that it can be translated. Use `t("key")` or
+`src/i18n/english.rs`, under a key, so that it can be translated. Use `t("key")` or
 `tf("key", &[("name", &value)])` rather than writing the text in place, and
 write values as `{name}` rather than building sentences from pieces, since
 word order differs between languages. Tables of labels, such as column titles,

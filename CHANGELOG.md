@@ -23,6 +23,8 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 - The log is kept at the `info` level for new installs, so it no longer records the path of every
   request, which can name users, unless you set `level = debug`. Existing settings are kept.
 - On macOS and Linux, only you can read the log, as with the saved sign-in.
+- **Remote Servers › Refresh** checks four servers at a time, rather than connecting to every
+  server at once. Each check's 4-minute limit starts when its turn comes.
 
 ### Fixed
 
@@ -57,6 +59,8 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 - Shared code replaces copies: one device code sign-in for signing in and for approving
   permissions, one way of following pages of results for Graph and Exchange Online (which no
   longer copies every object it reads), and one search for the user, group and device pickers.
+- The English text of the interface is in `src/i18n/english.rs`, apart from the code that
+  translates it.
 
 ## [1.5.0] - 2026-10-21
 

@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_PORT: u16 = 22;
@@ -38,6 +38,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(240);
 /// More output than this means something other than the report is being printed.
 const MAX_OUTPUT: usize = 32 * 1024 * 1024;
+/// How many servers are checked at once. Checking them all waits for a turn rather than
+/// opening a connection to every server at the same moment.
+const MAX_CHECKS_AT_ONCE: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -384,7 +387,34 @@ async fn fetch(server: &Server, secret: Option<&str>, known_hosts: Vec<PathBuf>)
 
 /// Checks a server (on a worker thread): signs in, runs the report and reads it.
 pub fn check(server: &Server, secret: Option<String>) -> anyhow::Result<Report> {
+    // The time a check may take is counted from its turn, not from when it was asked for.
+    let _turn = Turn::wait();
     check_with(server, secret, known_hosts_files())
+}
+
+/// How many checks are running, and the signal that one has finished.
+static CHECKS: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+/// One of the [`MAX_CHECKS_AT_ONCE`] turns to check a server, given back when dropped, even if
+/// the check panics.
+struct Turn;
+
+impl Turn {
+    fn wait() -> Turn {
+        let (running, finished) = &CHECKS;
+        let running = running.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut running = finished.wait_while(running, |n| *n >= MAX_CHECKS_AT_ONCE).unwrap_or_else(PoisonError::into_inner);
+        *running += 1;
+        Turn
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let (running, finished) = &CHECKS;
+        *running.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+        finished.notify_one();
+    }
 }
 
 fn check_with(server: &Server, secret: Option<String>, known_hosts: Vec<PathBuf>) -> anyhow::Result<Report> {
@@ -1127,6 +1157,30 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checks_take_turns() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (now, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        std::thread::scope(|s| {
+            for _ in 0..12 {
+                s.spawn(|| {
+                    let _turn = Turn::wait();
+                    most.fetch_max(now.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(20));
+                    now.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        assert!(most.load(Ordering::SeqCst) <= MAX_CHECKS_AT_ONCE);
+        // Every turn was given back, even by a check that panicked.
+        let _ = std::thread::spawn(|| {
+            let _turn = Turn::wait();
+            panic!("check failed");
+        })
+        .join();
+        assert_eq!(*CHECKS.0.lock().unwrap(), 0);
+    }
 
     const UBUNTU: &str = "@@uname\nLinux\n6.8.0-45-generic\nx86_64\n@@hostname\nweb1\n@@os-release\n\
         PRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\n@@uptime\n90061.52\n\
