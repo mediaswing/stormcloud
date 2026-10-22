@@ -1,10 +1,9 @@
 //! Modal dialogs: messages, confirmations, forms, pickers and the sign-in prompt.
 
-use crate::app::App;
+use crate::app::{App, MenuFor};
 use crate::bulk::Bulk;
 use crate::graph::Graph;
 use crate::i18n::{t, tf};
-use crate::ops::item_actions;
 use crate::sheets::Sheet;
 use crate::app::Bold;
 use eframe::egui::{self, Align, Key, Layout, Modifiers, RichText};
@@ -34,7 +33,8 @@ pub enum Dialog {
     Language(Box<crate::language::LanguageDialog>),
     /// A device code sign-in; `approval` when it is only to approve more permissions.
     DeviceCode { message: String, uri: String, code: String, approval: bool, cancelled: Arc<AtomicBool> },
-    ContextMenu,
+    /// The context menu, opened with Shift+F10.
+    ContextMenu(MenuFor),
     Help,
     About,
     Update(crate::update::Release),
@@ -383,25 +383,24 @@ impl App {
                 }
                 !close
             }
-            Dialog::ContextMenu => {
+            Dialog::ContextMenu(what) => {
+                let what = *what;
                 let mut close = escape;
                 modal.show(ctx, |ui| {
                     ui.set_min_width(260.0);
-                    let name = self.selected().map(|o| self.node.object_name(o)).unwrap_or_default();
+                    let name = match what {
+                        MenuFor::Item => self.selected().map(|o| self.node.object_name(o)).unwrap_or_default(),
+                        MenuFor::Node | MenuFor::List => self.node.title(),
+                    };
                     ui.label(RichText::new(if name.is_empty() { t("pane.actions") } else { name }).bold());
                     ui.separator();
                     ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
-                        let acts = if self.selected().is_some() { item_actions(self.node) } else { Vec::new() };
-                        if acts.is_empty() {
-                            ui.label(t("menu.no_actions"));
-                        }
-                        for (i, act) in acts.into_iter().enumerate() {
-                            let r = self.action_button(ui, act);
-                            if i == 0 && first {
-                                r.request_focus();
+                        let buttons = self.context_menu_ui(ui, what);
+                        if first
+                            && let Some(b) = buttons.iter().find(|b| b.enabled()) {
+                                b.request_focus();
                             }
-                            close |= r.clicked();
-                        }
+                        close |= buttons.iter().any(|b| b.clicked());
                     });
                 });
                 !close

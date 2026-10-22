@@ -26,6 +26,17 @@ pub enum Pane {
     Actions,
 }
 
+/// What a context menu is about, which decides the actions it offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuFor {
+    /// A node in the console tree.
+    Node,
+    /// The results list, away from any object in it.
+    List,
+    /// The selected object in the results list.
+    Item,
+}
+
 const ARROWS_LOCKED: EventFilter = EventFilter {
     tab: false,
     horizontal_arrows: true,
@@ -843,7 +854,12 @@ impl App {
             self.cycle_pane(false);
         }
         if !typing && pressed(sc(Modifiers::SHIFT, Key::F10)) {
-            self.push(Dialog::ContextMenu);
+            let what = match self.pane {
+                Pane::Tree => MenuFor::Node,
+                _ if self.selected().is_some() => MenuFor::Item,
+                _ => MenuFor::List,
+            };
+            self.push(Dialog::ContextMenu(what));
         }
         if typing {
             // Shortcuts below would clash with editing text (e.g. Delete).
@@ -1092,10 +1108,11 @@ impl App {
                             let text = tf(key, &[("title", &title), ("level", &(depth + 1))]);
                             egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, self.node == node, text)
                         });
-                        if r.clicked() {
+                        if r.clicked() || r.secondary_clicked() {
                             self.select_node(node);
                             self.pane = Pane::Tree;
                         }
+                        self.context_menus(std::slice::from_ref(&r), MenuFor::Node);
                         if r.double_clicked() && node.has_children() {
                             action = Some((node, Key::Space));
                         }
@@ -1185,6 +1202,57 @@ impl App {
         r
     }
 
+    /// The contents of a right-click menu, or the Shift+F10 menu: everything the keyboard can do
+    /// to `what`, with its shortcut. Runs whichever is clicked, and returns the buttons.
+    pub fn context_menu_ui(&mut self, ui: &mut egui::Ui, what: MenuFor) -> Vec<egui::Response> {
+        let mut buttons = Vec::new();
+        if what == MenuFor::Node && self.node.has_children() {
+            let expanded = self.expanded.contains(&self.node);
+            let (label, key) = if expanded { ("menu.collapse", "←") } else { ("menu.expand", "→") };
+            let r = ui.add(egui::Button::new(t(label)).shortcut_text(key).frame(false));
+            if r.clicked() && !self.expanded.remove(&self.node) {
+                self.expanded.insert(self.node);
+            }
+            buttons.push(r);
+        }
+        let acts = match what {
+            MenuFor::Node | MenuFor::List => node_actions(self.node),
+            MenuFor::Item => item_actions(self.node),
+        };
+        if !acts.is_empty() && !buttons.is_empty() {
+            ui.separator();
+        }
+        for act in acts {
+            buttons.push(self.action_button(ui, act));
+        }
+        if what == MenuFor::List && self.node.is_list() {
+            if !buttons.is_empty() {
+                ui.separator();
+            }
+            let shortcut = ui.ctx().format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F));
+            let r = ui.add(egui::Button::new(t("menu.filter")).shortcut_text(shortcut).frame(false));
+            if r.clicked() {
+                self.focus_filter = true;
+            }
+            buttons.push(r);
+        }
+        if buttons.is_empty() {
+            ui.label(t("menu.no_actions"));
+        }
+        buttons
+    }
+
+    /// Shows the right-click menu for `what` on each of `targets`.
+    fn context_menus(&mut self, targets: &[egui::Response], what: MenuFor) {
+        for target in targets {
+            target.context_menu(|ui| {
+                if self.context_menu_ui(ui, what).iter().any(|b| b.clicked()) {
+                    ui.close();
+                }
+            });
+        }
+    }
+
     fn actions_panel(&mut self, ui: &mut egui::Ui) {
         egui::Panel::right("actions").resizable(true).default_size(230.0).min_size(170.0).show(ui, |ui| {
             pane_heading(ui, &t("pane.actions"), self.pane == Pane::Actions);
@@ -1226,36 +1294,44 @@ impl App {
 
     fn central(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
-            let heading = if self.node == Node::Root && !self.tenant_name.is_empty() {
-                format!("{} — {}", self.node.title(), self.tenant_name)
-            } else {
-                self.node.title()
-            };
-            pane_heading(ui, &heading, self.pane == Pane::List);
-            if !self.signed_in && self.node.endpoint().is_some() {
-                ui.add_space(12.0);
-                ui.label(t("central.not_signed_in"));
-                if ui.button(t("central.sign_in")).clicked() {
-                    self.sign_in();
-                }
-                return;
-            }
-            if let Some(err) = self.errors.get(&self.node).cloned() {
-                ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {err}"));
-                if ui.button(t("central.retry")).clicked() {
-                    self.refresh();
-                }
-                return;
-            }
-            if self.loading.contains(&self.node) && !self.data.contains_key(&self.node) {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(tf("status.loading_list", &[("list", &self.node.list_name())]));
-                });
-                return;
-            }
-            self.result_table(ui);
+            // Behind everything else in the pane, so it gets the right-clicks that miss the rows.
+            // Not focusable, as the menu is also on Shift+F10.
+            let background = ui.interact(ui.max_rect(), ui.id().with("list-menu"), Sense::CLICK);
+            self.results(ui);
+            self.context_menus(&[background], MenuFor::List);
         });
+    }
+
+    fn results(&mut self, ui: &mut egui::Ui) {
+        let heading = if self.node == Node::Root && !self.tenant_name.is_empty() {
+            format!("{} — {}", self.node.title(), self.tenant_name)
+        } else {
+            self.node.title()
+        };
+        pane_heading(ui, &heading, self.pane == Pane::List);
+        if !self.signed_in && self.node.endpoint().is_some() {
+            ui.add_space(12.0);
+            ui.label(t("central.not_signed_in"));
+            if ui.button(t("central.sign_in")).clicked() {
+                self.sign_in();
+            }
+            return;
+        }
+        if let Some(err) = self.errors.get(&self.node).cloned() {
+            ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {err}"));
+            if ui.button(t("central.retry")).clicked() {
+                self.refresh();
+            }
+            return;
+        }
+        if self.loading.contains(&self.node) && !self.data.contains_key(&self.node) {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(tf("status.loading_list", &[("list", &self.node.list_name())]));
+            });
+            return;
+        }
+        self.result_table(ui);
     }
 
     fn result_table(&mut self, ui: &mut egui::Ui) {
@@ -1295,12 +1371,9 @@ impl App {
         let mut open = None;
         let mut key_action: Option<Key> = None;
         let mut typed: Option<String> = None;
-        let mut menu_act: Option<Act> = None;
+        // Everything in the rows that a right-click can land on.
+        let mut menu_targets: Vec<egui::Response> = Vec::new();
         let mut got_focus = false;
-        let item_acts: Vec<(Act, String, bool)> = item_actions(self.node)
-            .into_iter()
-            .map(|a| (a, self.act_label(a), self.act_enabled(a) || a.needs_selection() && self.signed_in))
-            .collect();
         let sort = self.sort;
         let sel = self.sel;
         let want_focus = self.focus_pane == Some(Pane::List);
@@ -1368,35 +1441,27 @@ impl App {
                                         }
                                     });
                                 }
-                                if r.clicked() {
+                                if r.clicked() || r.secondary_clicked() {
                                     clicked = Some(pos);
                                 }
                                 if r.double_clicked() {
                                     open = Some(pos);
                                 }
+                                menu_targets.push(r);
                             } else {
-                                ui.add(egui::Label::new(text).truncate());
+                                // Not selectable, so clicks on the text reach the row.
+                                ui.add(egui::Label::new(text).truncate().selectable(false));
                             }
                         });
                     }
                     let resp = row.response();
-                    if resp.clicked() {
+                    if resp.clicked() || resp.secondary_clicked() {
                         clicked = Some(pos);
                     }
                     if resp.double_clicked() {
                         open = Some(pos);
                     }
-                    if resp.secondary_clicked() {
-                        clicked = Some(pos);
-                    }
-                    resp.context_menu(|ui| {
-                        for (act, label, enabled) in &item_acts {
-                            if ui.add_enabled(*enabled, egui::Button::new(label)).clicked() {
-                                menu_act = Some(*act);
-                                ui.close();
-                            }
-                        }
-                    });
+                    menu_targets.push(resp);
                 });
             });
 
@@ -1421,9 +1486,8 @@ impl App {
             self.sel = Some(p);
             self.run_act(if self.node.is_list() { Act::Properties } else { Act::Open });
         }
-        if let Some(act) = menu_act {
-            self.run_act(act);
-        }
+        // After the selection, so a right-clicked row's menu is about that row from the start.
+        self.context_menus(&menu_targets, MenuFor::Item);
         let cur = self.sel.unwrap_or(0);
         let page = 15;
         match key_action {

@@ -394,6 +394,38 @@ fn load_permissions(g: &Graph, id: &str) -> anyhow::Result<TabBody> {
     Ok(TabBody::Table { headers: vec!["col.api", "col.permissions", "col.type", "col.granted_for"], rows })
 }
 
+/// The right-click menu of a properties tab: the same operations as its buttons, with their keys.
+fn tab_menu(ui: &mut egui::Ui, labels: [Option<&'static str>; 3], extras: &[&str], has_row: bool) -> Option<TabOp> {
+    let item = |ui: &mut egui::Ui, label: &str, key: &str, enabled: bool| {
+        ui.add_enabled(enabled, egui::Button::new(t(label)).shortcut_text(key).frame(false)).clicked()
+    };
+    let mut op = None;
+    if let Some(l) = labels[0]
+        && item(ui, l, "Insert", true) {
+            op = Some(TabOp::Add);
+        }
+    if let Some(l) = labels[1]
+        && item(ui, l, "Delete", has_row) {
+            op = Some(TabOp::Remove);
+        }
+    if let Some(l) = labels[2]
+        && item(ui, l, "F2", true) {
+            op = Some(TabOp::Edit);
+        }
+    for (i, l) in extras.iter().enumerate() {
+        if item(ui, l, "", true) {
+            op = Some(TabOp::Extra(i));
+        }
+    }
+    if labels.iter().any(Option::is_some) || !extras.is_empty() {
+        ui.separator();
+    }
+    if item(ui, "act.refresh", "F5", true) {
+        op = Some(TabOp::Reload);
+    }
+    op
+}
+
 impl App {
     fn sheet_mut(&mut self, id: u64) -> Option<&mut Sheet> {
         match self.dialog_mut(id) {
@@ -526,6 +558,9 @@ impl App {
             ui.separator();
             let tab = &mut sheet.tabs[sheet.active];
             let body_height = 330.0;
+            // Behind the tab's contents, so it gets the right-clicks that miss everything else.
+            let body_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), body_height));
+            let mut menu_targets = vec![ui.interact(body_rect, ui.id().with(("tab-menu", sheet_id)), Sense::CLICK)];
             match &tab.body {
                 TabBody::Loading => {
                     ui.allocate_ui(egui::vec2(ui.available_width(), body_height), |ui| {
@@ -544,8 +579,8 @@ impl App {
                     egui::ScrollArea::vertical().max_height(body_height).auto_shrink([false, false]).show(ui, |ui| {
                         egui::Grid::new(("fields", sheet_id, kind as u8)).num_columns(2).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
                             for (k, v) in fields {
-                                ui.label(RichText::new(k).bold());
-                                ui.add(egui::Label::new(if v.is_empty() { "—" } else { v.as_str() }).wrap().selectable(true));
+                                menu_targets.push(ui.label(RichText::new(k).bold()));
+                                menu_targets.push(ui.add(egui::Label::new(if v.is_empty() { "—" } else { v.as_str() }).wrap().selectable(true)));
                                 ui.end_row();
                             }
                         });
@@ -597,17 +632,21 @@ impl App {
                                                     b.request_focus();
                                                     first_focus = false;
                                                 }
-                                                if b.clicked() || b.gained_focus() {
+                                                if b.clicked() || b.secondary_clicked() || b.gained_focus() {
                                                     clicked = Some(ri);
                                                 }
+                                                menu_targets.push(b);
                                             } else {
-                                                ui.add(egui::Label::new(cell.as_str()).truncate());
+                                                // Not selectable, so clicks on the text reach the row.
+                                                ui.add(egui::Label::new(cell.as_str()).truncate().selectable(false));
                                             }
                                         });
                                     }
-                                    if r.response().clicked() {
+                                    let resp = r.response();
+                                    if resp.clicked() || resp.secondary_clicked() {
                                         clicked = Some(ri);
                                     }
+                                    menu_targets.push(resp);
                                 });
                             }
                         });
@@ -617,9 +656,17 @@ impl App {
                     }
                 }
             }
+            let has_row = tab.sel.is_some() && matches!(tab.body, TabBody::Table { .. });
+            for target in &menu_targets {
+                target.context_menu(|ui| {
+                    if let Some(o) = tab_menu(ui, labels, extras, has_row) {
+                        op = Some(o);
+                        ui.close();
+                    }
+                });
+            }
             ui.separator();
             ui.horizontal(|ui| {
-                let has_row = tab.sel.is_some() && matches!(tab.body, TabBody::Table { .. });
                 if let Some(l) = labels[0]
                     && ui.button(t(l)).on_hover_text("Insert").clicked() {
                         op = Some(TabOp::Add);

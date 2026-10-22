@@ -102,6 +102,8 @@ const ENGLISH: &[(&str, &str)] = &[
     ("menu.no_actions", "No actions available"),
     ("menu.view", "View"),
     ("menu.filter", "Filter…"),
+    ("menu.expand", "Expand"),
+    ("menu.collapse", "Collapse"),
     ("menu.actions_pane", "Actions pane"),
     ("menu.show_admin_tools", "Show admin tools in Applications"),
     ("menu.theme", "Theme"),

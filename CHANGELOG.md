@@ -4,6 +4,21 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Right-click menus throughout, offering the same actions as the keyboard, with their shortcuts:
+  on a node in the console tree (including Expand and Collapse), on an object in the results
+  list, on empty space in the results list (the node's actions and Filter), and on a properties
+  tab (add, remove, edit, the tab's other buttons and Refresh).
+
+### Changed
+
+- **Shift+F10** now shows the same menu as right-clicking wherever the focus is. In the console
+  tree it offers the node's actions, where before it offered nothing.
+- Clicking the text in any column of the results list or a properties table now selects the row.
+
 ## [1.5.0] - 2026-10-21
 
 Adds keeping watch over Linux servers over SSH, and an installer for Windows on Arm.
