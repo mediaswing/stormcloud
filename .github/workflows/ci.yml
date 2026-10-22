@@ -1,0 +1,40 @@
+# Runs the tests and Clippy on every push and pull request, on each platform the
+# app ships for, so a problem shows up when it is made rather than at release
+# time (release.yml only runs on version tags).
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - if: runner.os == 'Linux'
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.3
+        with:
+          packages: >-
+            pkg-config libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+          version: 1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2.9.2
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings

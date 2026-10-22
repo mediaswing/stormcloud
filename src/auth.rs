@@ -400,22 +400,10 @@ fn save_refresh_token(rt: &str) {
     }
 }
 
-/// Writes a file only its owner can read. On Unix the file is created owner-only, and an existing
-/// file is made owner-only before anything is written to it, so the token is never readable by
-/// other users, even briefly.
+/// Writes a file only its owner can read, so the token is never readable by other users, even
+/// briefly. It replaces any file already there, whatever that file's permissions were.
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        options.mode(0o600);
-        if path.exists() {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        }
-    }
-    options.open(path)?.write_all(bytes)
+    crate::config::write_file(path, bytes, true)
 }
 
 /// True when the token endpoint refused the refresh token itself (expired, revoked, or needing

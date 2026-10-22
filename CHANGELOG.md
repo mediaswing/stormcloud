@@ -18,6 +18,25 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 - **Shift+F10** now shows the same menu as right-clicking wherever the focus is. In the console
   tree it offers the node's actions, where before it offered nothing.
 - Clicking the text in any column of the results list or a properties table now selects the row.
+- On a Mac, menus and Keyboard shortcuts show ⌘N and ⌘⌫ for adding and removing, rather than
+  Insert and Delete keys that Mac keyboards don't have.
+
+### Fixed
+
+- Importing a large CSV file no longer freezes the app: a file of 50,000 rows took minutes to
+  read, and now takes a moment.
+- A problem inside the app during a background task is now reported as an error, rather than
+  leaving the spinner running for ever, a list that can't be reloaded, or an import or wizard
+  that can't be closed. A workflow step it happens in is reported as failed, and the rest of
+  the workflow carries on as it would after any failure.
+- Settings, Remote Servers and the saved sign-in are saved whole or not at all, so a crash or
+  power cut while saving can no longer leave a cut-off file behind.
+- If the app can't set up its connection to Microsoft (for example, when the system's security
+  settings can't be loaded), it says so rather than closing.
+
+### Internal
+
+- Tests and Clippy now run on every push and pull request, on Windows, macOS and Linux.
 
 ## [1.5.0] - 2026-10-21
 

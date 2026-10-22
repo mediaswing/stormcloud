@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const DEFAULT_SCOPES: &str = "User.ReadWrite.All Group.ReadWrite.All Device.ReadWrite.All \
 Directory.Read.All RoleManagement.ReadWrite.Directory Organization.Read.All \
@@ -98,6 +98,38 @@ pub fn config_dir() -> PathBuf {
         base.join("stormcloud")
     } else {
         base.join("StormCloud")
+    }
+}
+
+/// Writes `bytes` to `path` by way of a new file beside it that is then swapped in, so a crash or
+/// power cut part way through leaves the old file rather than a cut-off one, and a link in its
+/// place is replaced rather than followed. A `private` file can only be read by its owner on Unix,
+/// from the moment it is created.
+pub fn write_file(path: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let temp = path.with_file_name(format!(".{name}.tmp"));
+    // A file left by an earlier crash would keep its permissions when opened again.
+    let _ = fs::remove_file(&temp);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let written = options.open(&temp).and_then(|mut f| {
+        f.write_all(bytes)?;
+        f.sync_all()
+    });
+    match written.and_then(|()| fs::rename(&temp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&temp);
+            Err(e)
+        }
     }
 }
 
@@ -247,7 +279,7 @@ impl Settings {
             self.language.trim(),
             self.translation_model.trim(),
         );
-        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        write_file(&path, text.as_bytes(), false).with_context(|| format!("writing {}", path.display()))?;
         Ok(path)
     }
 }
@@ -280,6 +312,23 @@ mod tests {
         assert_eq!(ini[&("auth".into(), "tenant_id".into())], "abc");
         assert_eq!(ini[&("auth".into(), "client_id".into())], "def");
         assert_eq!(ini[&("cloud".into(), "x".into())], "1");
+    }
+
+    #[test]
+    fn writes_files_whole() {
+        let dir = std::env::temp_dir().join(format!("stormcloud-write-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.ini");
+        fs::write(&path, "old and longer").unwrap();
+        // A temporary file left by a crash is replaced, not reused.
+        fs::write(dir.join(".settings.ini.tmp"), "junk").unwrap();
+        write_file(&path, b"new", false).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        let names: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["settings.ini"]);
+        // Nothing is written where the folder doesn't exist, and no temporary file is left.
+        assert!(write_file(&dir.join("missing").join("x.ini"), b"x", false).is_err());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -68,16 +68,20 @@ pub fn parse_table(bytes: &[u8]) -> Result<Table, String> {
         .trim(csv::Trim::All)
         .from_reader(text.as_bytes());
     let mut records = Vec::new();
+    let bytes = text.as_bytes();
+    // Line breaks counted so far, up to `counted`, so each record only counts its own share.
+    let (mut counted, mut breaks) = (0, 0u64);
     for record in reader.records() {
         let record = record.map_err(|e| tf("csv.invalid", &[("error", &e)]))?;
         // From the byte offset, as the reader's own line count is off with Windows line endings
         // and blank lines: its offset can point at the line breaks before the record.
-        let bytes = text.as_bytes();
         let mut start = record.position().map_or(0, |p| p.byte() as usize);
         while start < bytes.len() && matches!(bytes[start], b'\r' | b'\n') {
             start += 1;
         }
-        let line = bytes[..start].iter().filter(|&&b| b == b'\n').count() as u64 + 1;
+        breaks += bytes[counted.min(start)..start].iter().filter(|&&b| b == b'\n').count() as u64;
+        counted = start;
+        let line = breaks + 1;
         let cells: Vec<String> = record.iter().map(unescape_cell).collect();
         if cells.iter().any(|c| !c.is_empty()) {
             records.push((line, cells));
@@ -482,7 +486,11 @@ impl App {
                 move |app, r: anyhow::Result<Vec<(usize, Result<Value, String>)>>| {
                     let mut outcomes = Vec::new();
                     let mut results = Vec::new();
-                    for (i, created) in r.unwrap_or_default() {
+                    let (created, stopped) = match r {
+                        Ok(created) => (created, None),
+                        Err(e) => (Vec::new(), Some(e)),
+                    };
+                    for (i, created) in created {
                         let [name, upn, password] = creds[i].clone();
                         match created {
                             Ok(user) => {
@@ -496,7 +504,7 @@ impl App {
                             }
                         }
                     }
-                    app.finish_bulk(dialog, outcomes, results, "bulk.created_users", "bulk.created_users_failed");
+                    app.finish_bulk(dialog, outcomes, results, stopped, "bulk.created_users", "bulk.created_users_failed");
                 },
             );
         };
@@ -567,12 +575,15 @@ impl App {
                         .collect())
                 },
                 move |app, r: anyhow::Result<Outcomes>| {
-                    let outcomes = r.unwrap_or_default();
+                    let (outcomes, stopped) = match r {
+                        Ok(outcomes) => (outcomes, None),
+                        Err(e) => (Vec::new(), Some(e)),
+                    };
                     let results = outcomes
                         .iter()
                         .map(|(i, o)| vec![values[*i].clone(), o.clone().unwrap_or_else(|e| e)])
                         .collect();
-                    app.finish_bulk(dialog, outcomes, results, "bulk.added_members", "bulk.added_members_failed");
+                    app.finish_bulk(dialog, outcomes, results, stopped, "bulk.added_members", "bulk.added_members_failed");
                 },
             );
         };
@@ -592,8 +603,17 @@ impl App {
     }
 
     /// Shows how an import went, row by row, and sums it up in the status bar with the text for
-    /// `done_key`, or for `failed_key` when some failed.
-    fn finish_bulk(&mut self, dialog: u64, outcomes: Outcomes, results: Vec<Vec<String>>, done_key: &str, failed_key: &str) {
+    /// `done_key`, or for `failed_key` when some failed. `stopped` is the error that ended the
+    /// import early, after which what happened to the rows it hadn't reported is not known.
+    fn finish_bulk(
+        &mut self,
+        dialog: u64,
+        outcomes: Outcomes,
+        results: Vec<Vec<String>>,
+        stopped: Option<anyhow::Error>,
+        done_key: &str,
+        failed_key: &str,
+    ) {
         let done = outcomes.iter().filter(|(_, o)| o.is_ok()).count();
         let failed = outcomes.len() - done;
         log::info!("CSV import: {done} done, {failed} failed");
@@ -602,6 +622,10 @@ impl App {
         } else {
             tf(failed_key, &[("count", &done), ("failed", &failed)])
         };
+        if let Some(e) = &stopped {
+            log::error!("CSV import stopped: {e:#}");
+            self.status = tf("bulk.stopped_status", &[("count", &done)]);
+        }
         let Some(Dialog::Bulk(bulk)) = self.dialog_mut(dialog) else { return };
         for (i, outcome) in outcomes {
             let row = &mut bulk.rows[i];
@@ -609,6 +633,12 @@ impl App {
                 Ok(status) => (RowState::Done, status),
                 Err(e) => (RowState::Failed, e),
             };
+        }
+        if let Some(e) = stopped {
+            let unknown = tf("bulk.stopped", &[("error", &format!("{e:#}"))]);
+            for row in bulk.rows.iter_mut().filter(|r| r.state == RowState::Ready) {
+                (row.state, row.status) = (RowState::Failed, unknown.clone());
+            }
         }
         bulk.results = results;
         bulk.stage = Stage::Done;
@@ -764,6 +794,20 @@ mod tests {
             .collect();
         assert_eq!(parse_table(&utf16).unwrap().rows[0].1, ["Ann", "ann@contoso.com"]);
         assert!(parse_table(b"\n\n").is_err());
+    }
+
+    #[test]
+    fn reads_large_files_quickly() {
+        // Counting each row's line from the start of the file took minutes for files this size.
+        let mut text = String::from("Name,UPN\r\n");
+        for i in 0..50_000 {
+            text.push_str(&format!("User {i},user{i}@contoso.com\r\n"));
+        }
+        let started = std::time::Instant::now();
+        let t = parse_table(text.as_bytes()).unwrap();
+        assert_eq!(t.rows.len(), 50_000);
+        assert_eq!(t.rows.last().unwrap().0, 50_001);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "took {:?}", started.elapsed());
     }
 
     #[test]

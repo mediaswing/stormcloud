@@ -366,6 +366,7 @@ const ENGLISH: &[(&str, &str)] = &[
     // Tasks, named in the status bar while they run and in the title of an error if they fail
     ("status.working", "{task}…"),
     ("status.done", "{task}: done"),
+    ("task.crashed", "Stopped by a problem inside the app: {error}. Details are in the log."),
     ("task.enable", "Enable {name}"),
     ("task.disable", "Disable {name}"),
     ("task.delete", "Delete {name}"),
@@ -733,6 +734,8 @@ const ENGLISH: &[(&str, &str)] = &[
     ("bulk.generated", "Generated"),
     ("bulk.from_file", "From file"),
     ("bulk.ready", "Ready"),
+    ("bulk.stopped", "Not known: the import stopped early ({error}). Refresh the list to see whether this was done."),
+    ("bulk.stopped_status", "The import stopped early, after {count} succeeded"),
     ("bulk.creating_users", "Creating {count} users…"),
     ("bulk.created", "Created"),
     ("bulk.created_users", "Created {count} users"),
@@ -1802,13 +1805,7 @@ pub fn save(dir: &Path, code: &str, translation: &Translation) -> anyhow::Result
     }
     let json = serde_json::to_vec_pretty(translation)?;
     std::fs::create_dir_all(dir).context("the languages folder could not be created")?;
-    // Written to a new file and then swapped in, so a crash can't leave a half-written
-    // translation, and a link in its place is replaced rather than followed.
-    let path = file_for(dir, code);
-    let temp = dir.join(format!(".{code}.json.tmp"));
-    let _ = std::fs::remove_file(&temp);
-    std::fs::write(&temp, json).context("the translation could not be saved")?;
-    std::fs::rename(&temp, &path).context("the translation could not be saved")
+    crate::config::write_file(&file_for(dir, code), &json, false).context("the translation could not be saved")
 }
 
 /// The languages to offer: English, the built-in list, and any other translation files someone

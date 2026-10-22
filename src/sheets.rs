@@ -394,6 +394,11 @@ fn load_permissions(g: &Graph, id: &str) -> anyhow::Result<TabBody> {
     Ok(TabBody::Table { headers: vec!["col.api", "col.permissions", "col.type", "col.granted_for"], rows })
 }
 
+/// The keys that add and remove on a properties tab, as named on this computer's keyboard. Macs
+/// have no Insert key, and their Delete key is Backspace, so ⌘N and ⌘⌫ do it there.
+pub const ADD_KEY: &str = if cfg!(target_os = "macos") { "⌘N" } else { "Insert" };
+pub const REMOVE_KEY: &str = if cfg!(target_os = "macos") { "⌘⌫" } else { "Delete" };
+
 /// The right-click menu of a properties tab: the same operations as its buttons, with their keys.
 fn tab_menu(ui: &mut egui::Ui, labels: [Option<&'static str>; 3], extras: &[&str], has_row: bool) -> Option<TabOp> {
     let item = |ui: &mut egui::Ui, label: &str, key: &str, enabled: bool| {
@@ -401,11 +406,11 @@ fn tab_menu(ui: &mut egui::Ui, labels: [Option<&'static str>; 3], extras: &[&str
     };
     let mut op = None;
     if let Some(l) = labels[0]
-        && item(ui, l, "Insert", true) {
+        && item(ui, l, ADD_KEY, true) {
             op = Some(TabOp::Add);
         }
     if let Some(l) = labels[1]
-        && item(ui, l, "Delete", has_row) {
+        && item(ui, l, REMOVE_KEY, has_row) {
             op = Some(TabOp::Remove);
         }
     if let Some(l) = labels[2]
@@ -668,11 +673,11 @@ impl App {
             ui.separator();
             ui.horizontal(|ui| {
                 if let Some(l) = labels[0]
-                    && ui.button(t(l)).on_hover_text("Insert").clicked() {
+                    && ui.button(t(l)).on_hover_text(ADD_KEY).clicked() {
                         op = Some(TabOp::Add);
                     }
                 if let Some(l) = labels[1]
-                    && ui.add_enabled(has_row, egui::Button::new(t(l))).on_hover_text("Delete").clicked() {
+                    && ui.add_enabled(has_row, egui::Button::new(t(l))).on_hover_text(REMOVE_KEY).clicked() {
                         op = Some(TabOp::Remove);
                     }
                 if let Some(l) = labels[2]

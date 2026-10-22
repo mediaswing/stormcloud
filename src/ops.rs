@@ -54,6 +54,8 @@ impl Act {
             Act::AddMember => vec![cmd(Key::M)],
             Act::AssignRole => vec![cmd(Key::R)],
             Act::AssignToUser => vec![cmd(Key::U)],
+            // The first is the one menus show: Macs have no forward Delete key on most keyboards.
+            Act::Delete if cfg!(target_os = "macos") => vec![cmd(Key::Backspace), KeyboardShortcut::new(Modifiers::NONE, Key::Delete)],
             Act::Delete => vec![KeyboardShortcut::new(Modifiers::NONE, Key::Delete), cmd(Key::Backspace)],
             Act::ExportList
             | Act::ExportDatabase

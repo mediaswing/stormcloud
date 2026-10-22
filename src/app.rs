@@ -103,6 +103,19 @@ pub struct App {
     quit: bool,
 }
 
+/// Runs `work`, turning a panic into an error, so whatever waits for the result still gets one
+/// and the app isn't left busy for ever. The panic itself is logged by the hook in `logging`.
+pub fn caught<T>(work: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|payload| {
+        let what = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        Err(anyhow::anyhow!(tf("task.crashed", &[("error", &what)])))
+    })
+}
+
 /// The font family for strong text, drawn in Google Sans Bold.
 fn bold_font() -> egui::FontFamily {
     egui::FontFamily::Name("bold".into())
@@ -310,7 +323,7 @@ impl App {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         thread::spawn(move || {
-            let result = work(&graph);
+            let result = caught(|| work(&graph));
             let _ = tx.send(Box::new(move |app: &mut App| {
                 app.busy -= 1;
                 if app.busy == 0 {
@@ -353,7 +366,7 @@ impl App {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         thread::spawn(move || {
-            let result = work();
+            let result = caught(work);
             let _ = tx.send(Box::new(move |app: &mut App| done(app, result)));
             ctx.request_repaint();
         });
@@ -368,7 +381,7 @@ impl App {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         thread::spawn(move || {
-            let result = work(&graph.auth);
+            let result = caught(|| work(&graph.auth));
             let _ = tx.send(Box::new(move |app: &mut App| done(app, result)));
             ctx.request_repaint();
         });
@@ -377,10 +390,14 @@ impl App {
     // ----- sign-in --------------------------------------------------------
 
     pub fn connect(&mut self) {
-        let http = reqwest::blocking::Client::builder()
+        let http = match reqwest::blocking::Client::builder()
             .user_agent(concat!("StormCloud/", env!("CARGO_PKG_VERSION")))
             .build()
-            .expect("HTTP client");
+        {
+            Ok(http) => http,
+            // Such as when the system's TLS set-up can't be loaded: the rest of the app still works.
+            Err(e) => return self.error(&t("signin.title"), format!("{e:#}")),
+        };
         let auth = Arc::new(Auth::new(self.settings.clone(), http.clone()));
         self.graph = Some(Arc::new(Graph::new(auth, http, &self.settings.graph_endpoint, &self.settings.exchange_endpoint)));
         self.signed_in = false;

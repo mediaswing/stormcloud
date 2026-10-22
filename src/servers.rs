@@ -145,7 +145,7 @@ fn save_rows(rows: &[Value]) -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = servers_path();
     let text = serde_json::to_string_pretty(&rows)?;
-    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    crate::config::write_file(&path, text.as_bytes(), false).with_context(|| format!("writing {}", path.display()))
 }
 
 fn new_id() -> String {

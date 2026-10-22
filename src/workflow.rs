@@ -88,7 +88,8 @@ pub fn execute<G, C>(g: &G, ctx: &mut C, steps: Vec<Step<G, C>>, progress: &Shar
         }
         set(State::Running);
         log::info!("Workflow step: {}", step.label);
-        match (step.run)(g, ctx) {
+        // A panic fails the step, so the workflow still finishes and its report is complete.
+        match crate::app::caught(|| (step.run)(g, ctx)) {
             Ok(text) => {
                 ok[i] = true;
                 set(State::Done(text));
@@ -359,6 +360,16 @@ mod tests {
         assert_eq!(summary(&p), "Completed: all 2 steps succeeded.");
         let text = report_text("Offboard Ann", &p);
         assert!(text.contains("1. step 0 — Done: fine"), "{text}");
+    }
+
+    #[test]
+    fn a_step_that_panics_fails_and_the_workflow_still_finishes() {
+        let crash = Step::new("crash", vec![], |_, _: &mut Vec<usize>| panic!("index out of bounds"));
+        let (p, ran) = run(vec![ok(0, vec![]), crash, ok(2, vec![1]), ok(3, vec![0])]);
+        assert_eq!(ran, [0, 3]);
+        assert!(matches!(&p.steps[1].state, State::Failed(e) if e.contains("index out of bounds")));
+        assert!(matches!(p.steps[2].state, State::Skipped(_)));
+        assert!(p.finished);
     }
 
     #[test]
