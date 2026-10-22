@@ -11,7 +11,7 @@ use crate::app::App;
 use crate::auth::NeedsScopes;
 use crate::config::{AUDIT_LOG_SCOPE, AUTH_METHODS_SCOPE};
 use crate::dialogs::{Dialog, Field, Form};
-use crate::graph::Graph;
+use crate::graph::{api_error, ApiError, Graph};
 use crate::i18n::{t, tf};
 use crate::model::{datetime, s, yes_no};
 use crate::sheets::{SheetRow, TabBody, TabKind, TabOp};
@@ -34,22 +34,36 @@ fn require(g: &Graph, scope: &str) -> Result<()> {
     g.auth.ensure_scopes(&[scope])
 }
 
+/// A refusal from Graph put in words that say what is missing: a licence, or a role.
+#[derive(Debug)]
+struct Explained {
+    text: String,
+    /// A licence is missing, rather than a role.
+    premium: bool,
+}
+
+impl std::fmt::Display for Explained {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl std::error::Error for Explained {}
+
 /// The error Graph gave, with what it means when the cause is a missing licence or role.
 pub fn explain(e: anyhow::Error, need: Need) -> anyhow::Error {
-    if e.downcast_ref::<NeedsScopes>().is_some() {
-        return e;
-    }
+    let refused = api_error(&e);
     let text = e.to_string();
-    if text.contains("RequestFromNonPremiumTenant") || text.contains("premium license") {
-        return anyhow!(tf("security.needs_premium", &[("error", &text)]));
+    if refused.is_some_and(ApiError::needs_premium) {
+        return Explained { text: tf("security.needs_premium", &[("error", &text)]), premium: true }.into();
     }
-    if text.contains("(403)") {
+    if refused.is_some_and(ApiError::forbidden) {
         let roles = t(match need {
             Need::Reports => "security.roles_reports",
             Need::Methods => "security.roles_methods",
             Need::Users => "security.roles_users",
         });
-        return anyhow!(tf("security.not_allowed", &[("roles", &roles), ("error", &text)]));
+        return Explained { text: tf("security.not_allowed", &[("roles", &roles), ("error", &text)]), premium: false }.into();
     }
     e
 }
@@ -59,13 +73,14 @@ fn unavailable(e: &anyhow::Error) -> String {
     if let Some(NeedsScopes(missing)) = e.downcast_ref::<NeedsScopes>() {
         return tf("security.unavailable_scope", &[("scopes", &missing.join(", "))]);
     }
-    let text = e.to_string();
-    if text.contains("RequestFromNonPremiumTenant") || text.contains("premium license") {
+    // Most errors here have been through `explain` already.
+    let (refused, explained) = (api_error(e), e.downcast_ref::<Explained>());
+    if refused.is_some_and(ApiError::needs_premium) || explained.is_some_and(|x| x.premium) {
         t("security.unavailable_premium")
-    } else if text.contains("(403)") {
+    } else if refused.is_some_and(ApiError::forbidden) || explained.is_some_and(|x| !x.premium) {
         t("security.unavailable_role")
     } else {
-        tf("security.unavailable", &[("error", &text)])
+        tf("security.unavailable", &[("error", &e)])
     }
 }
 
@@ -988,11 +1003,22 @@ mod tests {
 
     #[test]
     fn explains_licence_and_role_refusals() {
-        let premium = explain(anyhow!("Authentication_RequestFromNonPremiumTenantOrB2CTenant (403): Neither tenant is B2C or tenant doesn't have premium license"), Need::Reports);
+        use reqwest::StatusCode;
+        let refusal = |status, code: &str, message: &str| -> anyhow::Error {
+            let body = json!({ "error": { "code": code, "message": message } }).to_string();
+            crate::graph::ApiError::new(crate::auth::Api::Graph, status, &body).into()
+        };
+        let premium = refusal(StatusCode::FORBIDDEN, "Authentication_RequestFromNonPremiumTenantOrB2CTenant", "Neither tenant is B2C or tenant doesn't have premium license");
+        let premium = explain(premium, Need::Reports);
         assert!(premium.to_string().starts_with("Sign-in logs, sign-in activity and MFA registration details need a Microsoft Entra ID P1 or P2"));
-        let role = explain(anyhow!("Authorization_RequestDenied (403): Insufficient privileges"), Need::Methods);
+        assert_eq!(unavailable(&premium), t("security.unavailable_premium"));
+        let role = explain(refusal(StatusCode::FORBIDDEN, "Authorization_RequestDenied", "Insufficient privileges"), Need::Methods);
         assert!(role.to_string().contains("Authentication Administrator"));
-        let other = explain(anyhow!("Request_ResourceNotFound (404): gone"), Need::Methods);
+        assert_eq!(unavailable(&role), t("security.unavailable_role"));
+        let other = explain(refusal(StatusCode::NOT_FOUND, "Request_ResourceNotFound", "gone"), Need::Methods);
         assert_eq!(other.to_string(), "Request_ResourceNotFound (404): gone");
+        // Text that only looks like a refusal is not taken for one.
+        let lookalike = explain(anyhow!("Authorization_RequestDenied (403): Insufficient privileges"), Need::Methods);
+        assert_eq!(lookalike.to_string(), "Authorization_RequestDenied (403): Insufficient privileges");
     }
 }

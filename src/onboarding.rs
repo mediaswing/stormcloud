@@ -3,7 +3,7 @@
 
 use crate::app::{App, Bold};
 use crate::dialogs::{Dialog, PickItem};
-use crate::graph::{enc, Graph};
+use crate::graph::{api_error, enc, ApiError, Graph};
 use crate::i18n::{t, tf};
 use crate::model::{group_type, s, sku_name, Node};
 use crate::ops::generate_password;
@@ -288,7 +288,7 @@ impl Onboarding {
 fn retry_while_new<T>(mut f: impl FnMut() -> anyhow::Result<T>) -> anyhow::Result<T> {
     for wait in [2, 4, 8] {
         match f() {
-            Err(e) if e.to_string().contains("(404)") || e.to_string().contains("Request_ResourceNotFound") => {
+            Err(e) if api_error(&e).is_some_and(ApiError::not_found) => {
                 log::info!("Not found yet, retrying in {wait}s: {e}");
                 std::thread::sleep(Duration::from_secs(wait));
             }
@@ -322,7 +322,7 @@ fn step(planned: Planned, upn: &str) -> Step<Graph, Ctx> {
                 let body = json!({ "@odata.id": g.object_url("directoryObjects", &user_id) });
                 match retry_while_new(|| g.post(&format!("/groups/{id}/members/$ref"), &body)) {
                     Ok(_) => Ok(t("bulk.added")),
-                    Err(e) if e.to_string().contains("already exist") => Ok(t("bulk.already_member")),
+                    Err(e) if api_error(&e).is_some_and(ApiError::already_exists) => Ok(t("bulk.already_member")),
                     Err(e) => Err(e),
                 }
             }
@@ -454,7 +454,7 @@ impl App {
             }
             w.upn_check = Some(match r.and_then(|x| x) {
                 Ok(_) => UpnCheck::Taken,
-                Err(e) if e.to_string().contains("(404)") => UpnCheck::Free,
+                Err(e) if api_error(&e).is_some_and(ApiError::not_found) => UpnCheck::Free,
                 Err(e) => UpnCheck::Unknown(e.to_string()),
             });
         });

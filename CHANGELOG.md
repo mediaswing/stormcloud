@@ -37,6 +37,10 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 ### Internal
 
 - Tests and Clippy now run on every push and pull request, on Windows, macOS and Linux.
+- Errors from Microsoft Graph and Exchange Online are told apart by their status, code and
+  exception type rather than by searching the message shown, so "not found", "already a
+  member", "not allowed" and "needs a premium licence" are recognised however the message is
+  worded.
 
 ## [1.5.0] - 2026-10-21
 

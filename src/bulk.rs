@@ -5,7 +5,7 @@
 
 use crate::app::{App, Bold};
 use crate::dialogs::Dialog;
-use crate::graph::{enc, odata_str};
+use crate::graph::{api_error, enc, odata_str, ApiError};
 use crate::i18n::{self, t, tf};
 use crate::model::{Node, s};
 use crate::ops::{generate_password, is_guid};
@@ -566,7 +566,7 @@ impl App {
                                 let body = json!({ "@odata.id": format!("{endpoint}/v1.0/directoryObjects/{id}") });
                                 match g.post(&path, &body) {
                                     Ok(_) => Ok(t("bulk.added")),
-                                    Err(e) if e.to_string().contains("already exist") => Ok(t("bulk.already_member")),
+                                    Err(e) if api_error(&e).is_some_and(ApiError::already_exists) => Ok(t("bulk.already_member")),
                                     Err(e) => Err(e.to_string()),
                                 }
                             });
@@ -756,7 +756,7 @@ fn find_user(g: &crate::graph::Graph, value: &str) -> Result<String, String> {
     }
     match g.get(&format!("/users/{}?$select=id", enc(value))) {
         Ok(user) => return Ok(s(&user, "id")),
-        Err(e) if !e.to_string().contains("(404)") => return Err(e.to_string()),
+        Err(e) if !api_error(&e).is_some_and(ApiError::not_found) => return Err(e.to_string()),
         Err(_) => {}
     }
     let found = g

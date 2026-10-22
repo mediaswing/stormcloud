@@ -10,7 +10,7 @@
 use crate::app::{App, Bold};
 use crate::auth::NeedsConsent;
 use crate::dialogs::Dialog;
-use crate::graph::Graph;
+use crate::graph::{api_error, ApiError, Graph};
 use crate::i18n::{t, tf};
 use crate::model::{group_type, s, sku_name, Node};
 use crate::onboarding::{assigns_licences, managed, Managed, GROUP_SELECT};
@@ -420,7 +420,7 @@ fn load(g: &Graph, user_id: &str, upn: &str) -> anyhow::Result<(Found, bool)> {
             Some(m) => (Mailbox::Found { kind: s(m, "RecipientTypeDetails"), identity: crate::exchange::identity(m) }, false),
             None => (Mailbox::None, false),
         },
-        Err(e) if e.to_string().contains("couldn't be found") => (Mailbox::None, false),
+        Err(e) if api_error(&e).is_some_and(ApiError::not_found) => (Mailbox::None, false),
         Err(e) => {
             let consent = e.downcast_ref::<NeedsConsent>().is_some();
             problems.push(tf("offboard.mailbox_unread", &[("error", &e)]));

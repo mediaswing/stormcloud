@@ -97,7 +97,7 @@ impl Graph {
             let text = resp.text()?;
             if !status.is_success() {
                 log::error!("{method} {path} -> {status} in {ms} ms (request-id {request_id}): {}", text.chars().take(2000).collect::<String>());
-                bail!(graph_error(api, status, &text));
+                return Err(ApiError::new(api, status, &text).into());
             }
             log::debug!("{method} {path} -> {status} in {ms} ms ({} bytes, request-id {request_id})", text.len());
             if text.trim().is_empty() {
@@ -166,14 +166,82 @@ impl Graph {
     }
 }
 
-fn graph_error(api: Api, status: StatusCode, text: &str) -> String {
-    let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
-    match v["error"]["message"].as_str() {
-        // Exchange puts the exception type and a code in front of the message, between bars.
-        Some(msg) if api == Api::Exchange => msg.rsplit('|').next().unwrap_or(msg).trim().to_string(),
-        Some(msg) => format!("{} ({}): {}", v["error"]["code"].as_str().unwrap_or("Error"), status.as_u16(), msg),
-        None => format!("HTTP {}: {}", status, text.chars().take(300).collect::<String>()),
+/// A request that Microsoft Graph or Exchange Online refused, and what it said. Callers tell
+/// one failure from another with its methods, never by reading the text shown to the user.
+#[derive(Debug)]
+pub struct ApiError {
+    pub api: Api,
+    pub status: StatusCode,
+    /// Graph's error code, such as `Request_ResourceNotFound`, or the type of the exception an
+    /// Exchange cmdlet threw, such as `…ManagementObjectNotFoundException`. Empty if none was given.
+    pub code: String,
+    /// The service's own message, in English.
+    message: String,
+    /// What the user is shown.
+    text: String,
+}
+
+impl ApiError {
+    pub fn new(api: Api, status: StatusCode, body: &str) -> ApiError {
+        let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+        let (code, message, text) = match v["error"]["message"].as_str() {
+            // Exchange puts a code and the exception type in front of the message, between bars.
+            Some(msg) if api == Api::Exchange => {
+                let parts: Vec<&str> = msg.split('|').map(str::trim).collect();
+                let exception = parts.iter().find(|p| p.ends_with("Exception")).copied().unwrap_or("");
+                let message = parts.last().copied().unwrap_or(msg);
+                (exception.to_string(), message.to_string(), message.to_string())
+            }
+            Some(msg) => {
+                let code = v["error"]["code"].as_str().unwrap_or("");
+                let shown = if code.is_empty() { "Error" } else { code };
+                (code.to_string(), msg.to_string(), format!("{shown} ({}): {msg}", status.as_u16()))
+            }
+            None => (String::new(), String::new(), format!("HTTP {}: {}", status, body.chars().take(300).collect::<String>())),
+        };
+        ApiError { api, status, code, message, text }
     }
+
+    /// The object asked about doesn't exist (or, just after it was created, isn't everywhere yet).
+    pub fn not_found(&self) -> bool {
+        match self.api {
+            Api::Graph => self.status == StatusCode::NOT_FOUND || self.code == "Request_ResourceNotFound",
+            // Exchange gives no reliable status, so go by the exception, or by the message where
+            // there is none.
+            Api::Exchange if self.code.is_empty() => self.message.contains("couldn't be found"),
+            Api::Exchange => self.code.ends_with("NotFoundException"),
+        }
+    }
+
+    /// The person signed in isn't allowed to do it.
+    pub fn forbidden(&self) -> bool {
+        self.status == StatusCode::FORBIDDEN
+    }
+
+    /// What was being added is already there, such as a member already in a group. Graph only
+    /// says so in the message, under the general `Request_BadRequest` code.
+    pub fn already_exists(&self) -> bool {
+        self.status == StatusCode::BAD_REQUEST && self.message.contains("already exist")
+    }
+
+    /// The tenant needs a Microsoft Entra ID P1 or P2 licence for this.
+    pub fn needs_premium(&self) -> bool {
+        // Such as `Authentication_RequestFromNonPremiumTenantOrB2CTenant`.
+        self.code.contains("RequestFromNonPremiumTenant") || self.message.contains("premium license")
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// The service's refusal behind `e`, if that is what `e` is.
+pub fn api_error(e: &anyhow::Error) -> Option<&ApiError> {
+    e.downcast_ref::<ApiError>()
 }
 
 /// Copy of a request body with passwords and secrets masked, for logging.
@@ -228,6 +296,46 @@ mod tests {
         let out = redact(&body).to_string();
         assert!(!out.contains("hunter2") && !out.contains("abc") && !out.contains("drkzqAD"));
         assert!(out.contains("Ann") && out.contains("forceChangePasswordNextSignIn"));
+    }
+
+    #[test]
+    fn reads_graph_errors() {
+        let body = r#"{"error":{"code":"Request_ResourceNotFound","message":"Resource 'x' does not exist."}}"#;
+        let e = ApiError::new(Api::Graph, StatusCode::NOT_FOUND, body);
+        // The same text as before errors were structured.
+        assert_eq!(e.to_string(), "Request_ResourceNotFound (404): Resource 'x' does not exist.");
+        assert!(e.not_found() && !e.forbidden() && !e.already_exists());
+
+        let body = r#"{"error":{"code":"Request_BadRequest","message":"One or more added object references already exist for the following modified properties: 'members'."}}"#;
+        assert!(ApiError::new(Api::Graph, StatusCode::BAD_REQUEST, body).already_exists());
+
+        let body = r#"{"error":{"code":"Authorization_RequestDenied","message":"Insufficient privileges."}}"#;
+        assert!(ApiError::new(Api::Graph, StatusCode::FORBIDDEN, body).forbidden());
+
+        let body = r#"{"error":{"code":"Authentication_RequestFromNonPremiumTenantOrB2CTenant","message":"Neither tenant is B2C or tenant doesn't have premium license"}}"#;
+        assert!(ApiError::new(Api::Graph, StatusCode::FORBIDDEN, body).needs_premium());
+        let body = r#"{"error":{"code":"Authentication_RequestFromNonPremiumTenantOrB2CTenant","message":"Reworded."}}"#;
+        assert!(ApiError::new(Api::Graph, StatusCode::FORBIDDEN, body).needs_premium());
+
+        let e = ApiError::new(Api::Graph, StatusCode::BAD_GATEWAY, "<html>bad gateway</html>");
+        assert_eq!(e.to_string(), "HTTP 502 Bad Gateway: <html>bad gateway</html>");
+        assert!(!e.not_found());
+
+        // An error carried through context is still found.
+        let wrapped = anyhow::Error::from(ApiError::new(Api::Graph, StatusCode::NOT_FOUND, "")).context("loading the user");
+        assert!(api_error(&wrapped).is_some_and(ApiError::not_found));
+    }
+
+    #[test]
+    fn reads_exchange_errors() {
+        let body = r#"{"error":{"code":"InternalServerError","message":"|Microsoft.Exchange.Configuration.Tasks.ManagementObjectNotFoundException|The operation couldn't be performed because object 'ann@contoso.com' couldn't be found on 'XYZ.PROD.OUTLOOK.COM'."}}"#;
+        let e = ApiError::new(Api::Exchange, StatusCode::INTERNAL_SERVER_ERROR, body);
+        assert_eq!(e.to_string(), "The operation couldn't be performed because object 'ann@contoso.com' couldn't be found on 'XYZ.PROD.OUTLOOK.COM'.");
+        assert!(e.code.ends_with("ManagementObjectNotFoundException"));
+        assert!(e.not_found());
+
+        let body = r#"{"error":{"message":"Ex1|Microsoft.Exchange.Data.StoragePermanentException|Something else broke."}}"#;
+        assert!(!ApiError::new(Api::Exchange, StatusCode::INTERNAL_SERVER_ERROR, body).not_found());
     }
 
     #[test]
