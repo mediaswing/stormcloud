@@ -11,7 +11,6 @@ use crate::dialogs::{Dialog, Field, Form, PickItem, Picker};
 use crate::graph::{collect_pages, Graph};
 use crate::i18n::{t, tf};
 use crate::model::{s, yes_no, Node};
-use crate::ops::civil_from_days;
 use crate::sheets::{table, SheetRow, TabBody, TabKind, TabOp};
 use anyhow::{anyhow, bail, Result};
 use reqwest::Method;
@@ -144,10 +143,7 @@ fn list_text(v: &Value) -> String {
 fn exo_time(v: &Value) -> String {
     let text = v.as_str().unwrap_or("");
     if let Some(ms) = text.strip_prefix("/Date(").and_then(|t| t.split([')', '+', '-']).next()).and_then(|t| t.parse::<i64>().ok()) {
-        let secs = ms.div_euclid(1000);
-        let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
-        let day = secs.rem_euclid(86_400);
-        return format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", day / 3600, day % 3600 / 60);
+        return crate::time::iso_utc(ms.div_euclid(1000))[..16].replace('T', " ");
     }
     text.get(..16).unwrap_or(text).replace('T', " ")
 }
@@ -169,7 +165,12 @@ fn html_text(html: &str) -> String {
     let mut rest = html;
     while let Some(i) = rest.find('<') {
         out.push_str(&rest[..i]);
-        let Some(j) = rest[i..].find('>') else { break };
+        let Some(j) = rest[i..].find('>') else {
+            // A '<' that starts no tag is part of the text.
+            out.push_str(&rest[i..]);
+            rest = "";
+            break;
+        };
         let tag = rest[i + 1..i + j].to_ascii_lowercase();
         if tag.starts_with("br") || tag.starts_with("/p") || tag.starts_with("/div") {
             out.push('\n');
@@ -186,10 +187,8 @@ fn html_text(html: &str) -> String {
             }
         }
     }
-    if !rest.contains('<') {
-        out.push_str(rest);
-    }
-    let out = out
+    out.push_str(rest);
+    let out = numeric_entities(&out)
         .replace("&nbsp;", " ")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -197,6 +196,36 @@ fn html_text(html: &str) -> String {
         .replace("&#39;", "'")
         .replace("&amp;", "&");
     out.trim().to_string()
+}
+
+/// Decodes character references such as `&#8217;` and `&#x2019;`, leaving anything else as it is.
+fn numeric_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("&#") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 2..];
+        let decoded = after.find(';').filter(|&end| end > 0 && end <= 8).and_then(|end| {
+            let num = &after[..end];
+            let code = match num.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                None => num.parse().ok(),
+            };
+            code.and_then(char::from_u32).map(|c| (c, end))
+        });
+        match decoded {
+            Some((c, end)) => {
+                out.push(c);
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str("&#");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// HTML for a reply typed as plain text, keeping its line breaks.
@@ -319,20 +348,11 @@ fn mailbox_permissions(g: &Graph, id: &str) -> Result<TabBody> {
         }
     }
     rows.sort_by_cached_key(|r| (r.cells[0].to_lowercase(), r.cells[1].clone()));
-    Ok(TabBody::Table { headers: vec!["col.user", "col.permission"], rows })
+    Ok(TabBody::Table { headers: vec!["col.user", "col.permission"], rows, capped: false })
 }
 
 impl App {
     /// Shows the domains of the tenant as a choice, or a text box before they have loaded.
-    fn domain_field(&self) -> Field {
-        let domains: Vec<(String, String)> = self.domains.iter().map(|d| (d.clone(), format!("@{d}"))).collect();
-        if domains.is_empty() {
-            Field::text("domain", &t("field.domain"), "")
-        } else {
-            Field::choice("domain", &t("field.domain"), domains, 0)
-        }
-    }
-
     pub fn new_shared_mailbox(&mut self) {
         let form = Form::new(&t("exchange.new_mailbox_title"), &t("dialog.create"))
             .intro(&t("exchange.new_mailbox_intro"))
@@ -690,13 +710,7 @@ fn new_address(f: &Form) -> Result<(String, String), String> {
     if alias.contains('@') || alias.contains(' ') {
         return Err(t("exchange.bad_alias"));
     }
-    let domain = match f.choice("domain") {
-        d if !d.is_empty() => d,
-        _ => f.text("domain"),
-    };
-    if domain.is_empty() {
-        return Err(tf("form.required", &[("field", &t("field.domain"))]));
-    }
+    let domain = crate::ops::chosen_domain(f)?;
     Ok((f.text("name"), format!("{alias}@{domain}")))
 }
 
@@ -722,6 +736,8 @@ mod tests {
     fn strips_reply_html() {
         assert_eq!(html_text("<html><body><p>Away &amp; back</p><p>Monday</p></body></html>"), "Away & back\nMonday");
         assert_eq!(html_text("Plain text"), "Plain text");
+        assert_eq!(html_text("Back Monday, call <ext 123 or the desk"), "Back Monday, call <ext 123 or the desk");
+        assert_eq!(html_text("<p>It&#8217;s &#x2014; off &#;&#99999999; &amp;#39;</p>"), "It\u{2019}s \u{2014} off &#;&#99999999; &#39;");
         let owa = "<html><head><style type=\"text/css\" style=\"display:none;\"> P {margin-top:0;} </style></head>\
                    <body><div>Away</div><div>Back Monday</div></body></html>";
         assert_eq!(html_text(owa), "Away\nBack Monday");

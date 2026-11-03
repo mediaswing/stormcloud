@@ -22,6 +22,7 @@ use crate::dialogs::{Dialog, Field, Form};
 use crate::i18n::{t, tf};
 use crate::model::{s, yes_no, Node};
 use crate::sheets::{table, TabBody, TabKind};
+use crate::time::{iso_utc, now_iso};
 use anyhow::{anyhow, bail, Context};
 use russh::keys::{self, Algorithm, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
 use russh::{client, ChannelMsg, Disconnect, Preferred};
@@ -236,16 +237,6 @@ fn new_id() -> String {
         bytes = (nanos as u64).to_le_bytes();
     }
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn iso_utc(secs: u64) -> String {
-    let (y, m, d) = crate::ops::civil_from_days((secs / 86_400) as i64);
-    let rem = secs % 86_400;
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
-}
-
-fn now_iso() -> String {
-    iso_utc(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
 }
 
 // ----- errors that need the user ---------------------------------------------
@@ -877,7 +868,7 @@ fn zypper_rows<'a>(lines: &[&'a str], header: &str) -> Vec<Vec<&'a str>> {
 }
 
 fn epoch(lines: &[&str]) -> Option<String> {
-    lines.iter().find_map(|l| l.trim().parse::<u64>().ok()).filter(|&s| s > 0).map(iso_utc)
+    lines.iter().find_map(|l| l.trim().parse::<i64>().ok()).filter(|&s| s > 0).map(iso_utc)
 }
 
 pub fn parse_report(text: &str) -> Report {
@@ -1227,11 +1218,17 @@ impl App {
         }
     }
 
-    /// Updates the row for a server, and any of its property sheets that are open.
+    /// Updates the row for a server, and any of its property sheets that are open. The sheets
+    /// are updated at the next frame, as they are detached while dialogs are drawn, which is
+    /// when a form's or sheet's button calls this.
     fn update_server(&mut self, change: Value) {
         let id = s(&change, "id");
         self.upsert(Node::RemoteServers, change);
-        let Some(row) = self.server_row(&id).cloned() else { return };
+        self.defer(move |app| app.refresh_server_sheets(&id));
+    }
+
+    fn refresh_server_sheets(&mut self, id: &str) {
+        let Some(row) = self.server_row(id).cloned() else { return };
         for d in &mut self.dialogs {
             if let Dialog::Sheet(sheet) = &mut d.dialog
                 && sheet.node == Node::RemoteServers
@@ -1313,8 +1310,14 @@ impl App {
         self.save_servers();
     }
 
-    /// Asks for the server's password, or its key's passphrase, for this session.
+    /// Asks for the server's password, or its key's passphrase, for this session. Deferred to the
+    /// next frame, so a prompt that is already open is seen even when this is called while
+    /// dialogs are drawn.
     fn ask_server_secret(&mut self, server: Server, problem: Option<String>) {
+        self.defer(move |app| app.open_server_secret_prompt(server, problem));
+    }
+
+    fn open_server_secret_prompt(&mut self, server: Server, problem: Option<String>) {
         if let Some(&open) = self.ssh_prompts.get(&server.id)
             && self.dialogs.iter().any(|d| d.id == open)
         {

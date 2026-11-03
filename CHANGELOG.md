@@ -14,6 +14,30 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
   services, pending and security updates from Windows Update's last search, and whether a
   restart is needed. Servers already in the list stay Linux servers.
 
+### Fixed
+
+- **Export to MariaDB:** with "Remove rows…" ticked, a filtered list (or one with admin tools
+  hidden) is refused, rather than removing the rows of every object not shown.
+- Signing out while an access token was being refreshed could keep the sign-in, and save it
+  again; tokens asked for before signing out are now thrown away. Threads that need a new token
+  at the same time also share one request.
+- The Security tab no longer says sessions were revoked for older accounts with no creation or
+  password-change time.
+- **Member of:** Remove on a directory role or administrative unit explains that it isn't a
+  group, rather than failing with an error from Graph.
+- **Members**, **Member of**, **Licensed users** and an application's users say when only the
+  first 20,000 are shown.
+- **Remote Servers:** editing a server from its properties updates the open properties, so
+  editing it again starts from what was saved. A second password prompt no longer opens for the
+  same server.
+- **CSV import:** a corrected row after a rejected one for the same user is created, rather than
+  skipped as a duplicate.
+- Automatic replies with a `<` that starts no tag are shown whole, and numeric character
+  references such as `&#8217;` are decoded.
+- Typing a non-ASCII letter (é, Ł, Ж) in a list jumps to a matching row, and with nothing
+  selected the first row can match.
+- The log carries on after a failure to start a new file when it reaches its size limit.
+
 ## [1.6.0] - 2026-10-22
 
 Adds right-click menus throughout, and makes the app sturdier: large CSV imports no longer freeze

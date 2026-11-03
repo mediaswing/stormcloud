@@ -510,15 +510,13 @@ fn scoped(name: &str, scope: &str) -> String {
 pub fn group_item(v: &Value) -> GroupItem {
     let managed = managed(v);
     let assigns_licences = assigns_licences(v);
-    let (removable, mut note) = match managed {
+    let (removable, note) = match managed {
         Managed::Dynamic => (false, t("offboard.group_dynamic")),
         Managed::Synced => (false, t("offboard.group_synced")),
         Managed::Exchange => (true, t("offboard.group_exchange")),
         Managed::Graph => (true, String::new()),
     };
-    if assigns_licences {
-        note = if note.is_empty() { t("onboard.group_licences") } else { format!("{note}. {}", t("onboard.group_licences")) };
-    }
+    let note = crate::onboarding::with_licence_note(note, v);
     let identity = match s(v, "mail") {
         m if m.is_empty() => s(v, "id"),
         m => m,

@@ -9,7 +9,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The log is moved to `output.log.1`, replacing the one there, once it reaches this size.
 const MAX_BYTES: u64 = 5 * 1024 * 1024;
@@ -41,8 +40,10 @@ impl LogFile {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        if self.written > 0 && self.written + bytes.len() as u64 > self.max {
-            // A log that can't be rotated carries on in the file it has, if any.
+        if self.file.is_none() {
+            // Starting a new file failed when the log was last rotated, so try again.
+            self.file = open_private(&self.path).ok();
+        } else if self.written > 0 && self.written + bytes.len() as u64 > self.max {
             let _ = self.rotate();
         }
         if let Some(f) = &mut self.file
@@ -162,17 +163,9 @@ pub fn parse_level(s: &str) -> LevelFilter {
 
 /// UTC timestamp with milliseconds, e.g. `2026-10-14T13:45:01.123Z`.
 fn timestamp() -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = now.as_secs();
-    let (y, m, d) = crate::ops::civil_from_days((secs / 86_400) as i64);
-    let rem = secs % 86_400;
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{:03}Z",
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60,
-        now.subsec_millis()
-    )
+    let (secs, ms) = crate::time::now();
+    let iso = crate::time::iso_utc(secs);
+    format!("{}.{ms:03}Z", iso.trim_end_matches('Z'))
 }
 
 #[cfg(test)]

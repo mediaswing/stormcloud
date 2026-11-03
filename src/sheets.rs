@@ -87,8 +87,19 @@ pub enum TabBody {
     Loading,
     Error(String),
     Fields(Vec<(String, String)>),
-    /// The keys of the column titles in the catalogue, and the rows.
-    Table { headers: Vec<&'static str>, rows: Vec<SheetRow> },
+    /// The keys of the column titles in the catalogue, and the rows. `capped` when the list
+    /// stopped at [`crate::graph::MAX_ITEMS`] with more to come.
+    Table { headers: Vec<&'static str>, rows: Vec<SheetRow>, capped: bool },
+}
+
+impl TabBody {
+    /// Marks a table as cut off at [`crate::graph::MAX_ITEMS`].
+    fn capped(self, capped: bool) -> TabBody {
+        match self {
+            TabBody::Table { headers, rows, .. } => TabBody::Table { headers, rows, capped },
+            other => other,
+        }
+    }
 }
 
 pub struct SheetRow {
@@ -174,7 +185,7 @@ impl Sheet {
 
 pub fn table(headers: Vec<&'static str>, items: Vec<Value>, cells: impl Fn(&Value) -> Vec<String>) -> TabBody {
     let rows = items.into_iter().map(|v| SheetRow { cells: cells(&v), data: v }).collect();
-    TabBody::Table { headers, rows }
+    TabBody::Table { headers, rows, capped: false }
 }
 
 fn odata_kind(v: &Value) -> String {
@@ -255,8 +266,8 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
             };
             let fresh = g.get(&format!("/{coll}/{id}?$select={select}"))?;
             let mut fields = general_fields(&fresh, keys);
-            if node == Node::Devices {
-                fields[3].1 = model::join_type(&fields[3].1);
+            if let Some(i) = keys.iter().position(|&(_, key)| key == "trustType") {
+                fields[i].1 = model::join_type(&fields[i].1);
             }
             if node == Node::Applications {
                 fields.insert(4, (t("prop.visible_to_users"), model::yes_no(&model::visible_to_users(&fresh))));
@@ -264,8 +275,8 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
             return Ok((TabBody::Fields(fields), Some(fresh), Vec::new()));
         }
         (_, MemberOf) => {
-            let items = g.list(&format!("/{coll}/{id}/memberOf?$select=id,displayName,mail,description&$top=999"))?;
-            table(vec!["col.name", "col.type", "col.email"], items, |v| vec![s(v, "displayName"), odata_kind(v), s(v, "mail")])
+            let (items, capped) = g.list_capped(&format!("/{coll}/{id}/memberOf?$select=id,displayName,mail,description&$top=999"))?;
+            table(vec!["col.name", "col.type", "col.email"], items, |v| vec![s(v, "displayName"), odata_kind(v), s(v, "mail")]).capped(capped)
         }
         (Node::Users, UserLicences) => {
             let items = g.list(&format!("/users/{id}/licenseDetails"))?;
@@ -291,8 +302,8 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
             })
         }
         (_, Members) => {
-            let items = g.list(&format!("/groups/{id}/members?$select=id,displayName,userPrincipalName,mail&$top=999"))?;
-            table(vec!["col.name", "col.type", "col.upn_or_email"], items, principal_cols)
+            let (items, capped) = g.list_capped(&format!("/groups/{id}/members?$select=id,displayName,userPrincipalName,mail&$top=999"))?;
+            table(vec!["col.name", "col.type", "col.upn_or_email"], items, principal_cols).capped(capped)
         }
         (_, Owners) => {
             let items = g.list(&format!("/{coll}/{id}/owners?$select=id,displayName,userPrincipalName,mail"))?;
@@ -311,12 +322,13 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
         }
         (_, LicensedUsers) => {
             let sku = s(obj, "skuId");
-            let items = g.list_advanced(&format!(
+            let (items, capped) = g.list_advanced_capped(&format!(
                 "/users?$filter=assignedLicenses/any(x:x/skuId eq {sku})&$select=id,displayName,userPrincipalName,accountEnabled&$count=true&$top=999"
             ))?;
             table(vec!["col.name", "col.upn", "col.enabled"], items, |v| {
                 vec![s(v, "displayName"), s(v, "userPrincipalName"), model::yes_no(&v["accountEnabled"])]
             })
+            .capped(capped)
         }
         (_, AppUsers) => {
             let roles: std::collections::HashMap<String, String> = obj["appRoles"]
@@ -326,7 +338,7 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
                 .iter()
                 .map(|r| (s(r, "id"), s(r, "displayName")))
                 .collect();
-            let items = g.list(&format!("/servicePrincipals/{id}/appRoleAssignedTo?$top=999"))?;
+            let (items, capped) = g.list_capped(&format!("/servicePrincipals/{id}/appRoleAssignedTo?$top=999"))?;
             table(vec!["col.name", "col.type", "col.role"], items, |v| {
                 let role = s(v, "appRoleId");
                 let role = match roles.get(&role) {
@@ -336,6 +348,7 @@ fn load_tab(g: &Graph, node: Node, kind: TabKind, obj: &Value) -> anyhow::Result
                 };
                 vec![s(v, "principalDisplayName"), s(v, "principalType"), role]
             })
+            .capped(capped)
         }
         (_, Permissions) => load_permissions(g, &id)?,
         _ => TabBody::Fields(Vec::new()),
@@ -391,7 +404,7 @@ fn load_permissions(g: &Graph, id: &str) -> anyhow::Result<TabBody> {
         rows.push(SheetRow { cells, data: grant });
     }
     rows.sort_by_cached_key(|r| (r.cells[0].to_lowercase(), r.cells[2].clone(), r.cells[1].to_lowercase()));
-    Ok(TabBody::Table { headers: vec!["col.api", "col.permissions", "col.type", "col.granted_for"], rows })
+    Ok(TabBody::Table { headers: vec!["col.api", "col.permissions", "col.type", "col.granted_for"], rows, capped: false })
 }
 
 /// The keys that add and remove on a properties tab, as named on this computer's keyboard. Macs
@@ -591,7 +604,10 @@ impl App {
                         });
                     });
                 }
-                TabBody::Table { headers, rows } => {
+                TabBody::Table { headers, rows, capped } => {
+                    if *capped {
+                        ui.label(tf("sheet.capped", &[("count", &crate::graph::MAX_ITEMS)]));
+                    }
                     if rows.is_empty() {
                         ui.allocate_ui(egui::vec2(ui.available_width(), body_height), |ui| {
                             ui.label(t("sheet.empty"));
@@ -791,6 +807,13 @@ impl App {
                 let Some(row) = row else { return };
                 let rid = s(&row, "id");
                 let (what, path_or_body): (String, Work) = match kind {
+                    // Directory roles and administrative units are listed too, but aren't
+                    // left through the group's members.
+                    MemberOf if row["@odata.type"] != "#microsoft.graph.group" => {
+                        let text = tf("sheet.not_a_group", &[("from", &s(&row, "displayName")), ("kind", &odata_kind(&row))]);
+                        self.push(Dialog::message(&t("sheet.remove_from_group"), &text));
+                        return;
+                    }
                     MemberOf => {
                         let path = format!("/groups/{rid}/members/{id}/$ref");
                         let question = tf("sheet.remove_from_question", &[("name", &name), ("from", &s(&row, "displayName"))]);

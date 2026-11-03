@@ -74,18 +74,25 @@ pub fn assigns_licences(v: &Value) -> bool {
     v["assignedLicenses"].as_array().is_some_and(|a| !a.is_empty())
 }
 
+/// A group's note for the wizards, saying also that it assigns licences, when it does.
+pub fn with_licence_note(note: String, v: &Value) -> String {
+    match (assigns_licences(v), note.is_empty()) {
+        (false, _) => note,
+        (true, true) => t("onboard.group_licences"),
+        (true, false) => format!("{note}. {}", t("onboard.group_licences")),
+    }
+}
+
 pub fn classify_group(v: &Value) -> GroupChoice {
     let role_assignable = v["isAssignableToRole"] == true;
-    let (allowed, preselect, mut note) = match managed(v) {
+    let (allowed, preselect, note) = match managed(v) {
         Managed::Dynamic => (false, false, t("onboard.group_dynamic")),
         Managed::Synced => (false, false, t("onboard.group_synced")),
         Managed::Exchange => (false, false, t("onboard.group_exchange")),
         Managed::Graph if role_assignable => (true, false, t("onboard.group_roles")),
         Managed::Graph => (true, true, String::new()),
     };
-    if assigns_licences(v) {
-        note = if note.is_empty() { t("onboard.group_licences") } else { format!("{note}. {}", t("onboard.group_licences")) };
-    }
+    let note = with_licence_note(note, v);
     GroupChoice { id: s(v, "id"), name: s(v, "displayName"), kind: group_type(v), allowed, role_assignable, selected: preselect, note }
 }
 

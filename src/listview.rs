@@ -122,13 +122,13 @@ impl ListView {
         self.dirty = false;
     }
 
-    /// The position of the next row after the selection whose `first` column starts with `typed`,
-    /// going round to the top, for jumping to a row by typing.
+    /// The position of the next row after the selection (or from the top, with none) whose
+    /// `first` column starts with `typed`, going round to the top, for jumping to a row by typing.
     pub fn next_starting_with(&self, objects: &[Value], first: fn(&Value) -> String, typed: &str) -> Option<usize> {
         let typed = typed.to_lowercase();
         let n = self.rows.len();
-        let cur = self.sel.unwrap_or(0);
-        (1..=n).map(|k| (cur + k) % n).find(|&p| first(&objects[self.rows[p]]).to_lowercase().starts_with(&typed))
+        let start = self.sel.map_or(0, |cur| cur + 1);
+        (0..n).map(|k| (start + k) % n).find(|&p| first(&objects[self.rows[p]]).to_lowercase().starts_with(&typed))
     }
 }
 
@@ -228,6 +228,9 @@ mod tests {
         ];
         let mut view = built(&objects, |_| {});
         let first: fn(&Value) -> String = |v| s(v, "name");
+        // With nothing selected, the first row is a match too.
+        view.sel = None;
+        assert_eq!(view.next_starting_with(&objects, first, "a"), Some(0));
         view.select(0);
         assert_eq!(view.next_starting_with(&objects, first, "a"), Some(2));
         view.select(2);

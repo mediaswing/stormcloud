@@ -10,6 +10,7 @@
 use crate::app::App;
 use crate::auth::NeedsScopes;
 use crate::config::{AUDIT_LOG_SCOPE, AUTH_METHODS_SCOPE};
+use crate::time::parse_iso;
 use crate::dialogs::{Dialog, Field, Form};
 use crate::graph::{api_error, ApiError, Graph};
 use crate::i18n::{t, tf};
@@ -245,7 +246,7 @@ fn methods_table(methods: Vec<Value>) -> TabBody {
         .collect();
     // The password first, then the rest by name.
     rows.sort_by_key(|r| (method_type(&r.data) != "passwordAuthenticationMethod", r.cells[0].clone()));
-    TabBody::Table { headers: vec!["col.method", "col.details", "col.added_utc"], rows }
+    TabBody::Table { headers: vec!["col.method", "col.details", "col.added_utc"], rows, capped: false }
 }
 
 // ----- sign-ins ----------------------------------------------------------------
@@ -419,26 +420,13 @@ pub struct Facts {
     pub password_changed: String,
 }
 
-/// Seconds since 1970 of a Graph date and time such as `2026-10-19T08:00:00Z` (read as UTC).
-fn seconds(t: &str) -> Option<i64> {
-    let num = |r: std::ops::Range<usize>| t.get(r)?.parse::<i64>().ok();
-    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
-    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    // Days from the civil date (Howard Hinnant's algorithm).
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
-    let days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
-    Some(days * 86400 + hh * 3600 + mm * 60 + ss)
-}
-
 /// Whether sessions were revoked: Graph also sets the time sessions are valid from when the
 /// account is created and when its password changes, so only a later time means a revocation.
+/// Without either time, which Graph leaves out for some older accounts, it can't be told.
 fn sessions_revoked(f: &Facts) -> bool {
-    let Some(from) = seconds(&f.sessions_valid_from) else { return false };
-    let since = [&f.created, &f.password_changed].iter().filter_map(|t| seconds(t)).max().unwrap_or(i64::MIN);
-    from > since.saturating_add(120)
+    let Some(from) = parse_iso(&f.sessions_valid_from) else { return false };
+    let Some(since) = [&f.created, &f.password_changed].iter().filter_map(|t| parse_iso(t)).max() else { return false };
+    from > since + 120
 }
 
 /// Plain findings about why a user might be unable to sign in, most important first.
@@ -994,8 +982,9 @@ mod tests {
         assert_eq!(diagnose(&created), ["No problems found."]);
         let revoked = Facts { sessions_valid_from: "2026-10-18T17:30:00Z".into(), ..created };
         assert!(diagnose(&revoked)[0].starts_with("Sessions from before 2026-10-18 17:30 UTC"));
-        assert_eq!(seconds("1970-01-02T00:00:01Z"), Some(86401));
-        assert_eq!(seconds("2000-03-01T00:00:00Z"), Some(951868800));
+        // Some older accounts have neither time, so a revocation can't be told from creation.
+        let undated = Facts { created: String::new(), password_changed: String::new(), ..revoked };
+        assert_eq!(diagnose(&undated), ["No problems found."]);
 
         let guessing = Facts { sign_ins: Some(vec![sign_in(50126, "Invalid password"); 6]), ..Default::default() };
         assert!(diagnose(&guessing).iter().any(|x| x.starts_with("6 of the recent sign-ins failed")));

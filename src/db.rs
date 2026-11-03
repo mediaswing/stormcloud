@@ -1,4 +1,5 @@
-//! Export of the result list to a table on a MariaDB (or MySQL) server.
+//! Export of the result list to a table on a MariaDB server. (MySQL lacks the
+//! `ADD COLUMN IF NOT EXISTS` used to add columns.)
 //!
 //! The table is created if it is missing, with a text column for each column shown and the
 //! object's ID as the primary key. Columns added since an earlier export are added to the table.
@@ -158,8 +159,13 @@ impl App {
                     if let Some(why) = app.incomplete_list(node) {
                         return Err(tf("db.incomplete", &[("why", &why)]));
                     }
-                    if app.view_rows().is_empty() {
+                    let shown = app.view_rows().len();
+                    if shown == 0 {
                         return Err(t("db.empty"));
+                    }
+                    // Rows filtered out or hidden on screen are objects that still exist.
+                    if shown < app.data.get(&node).map_or(0, Vec::len) {
+                        return Err(t("db.filtered"));
                     }
                 }
                 let target = Target {

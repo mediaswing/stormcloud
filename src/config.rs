@@ -36,7 +36,7 @@ pub fn missing_scopes(scopes: &str, wanted: &[&str]) -> Vec<String> {
     wanted.iter().filter(|w| !have.contains(&w.to_ascii_lowercase())).map(|w| w.to_string()).collect()
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub tenant_id: String,
     pub client_id: String,
@@ -147,13 +147,18 @@ impl Settings {
     }
 
     pub fn load() -> Result<Settings> {
-        let path = settings_path();
+        match fs::read_to_string(settings_path()) {
+            Ok(text) => Ok(Settings::from_ini(&text)),
+            Err(_) => Ok(Settings::default()),
+        }
+    }
+
+    /// Reads `settings.ini`, keeping the default for anything it leaves out.
+    fn from_ini(text: &str) -> Settings {
         let mut s = Settings::default();
-        let Ok(text) = fs::read_to_string(&path) else {
-            return Ok(s);
-        };
-        let ini = parse_ini(&text);
+        let ini = parse_ini(text);
         let get = |sec: &str, key: &str| ini.get(&(sec.to_string(), key.to_string())).cloned();
+        let yes = |v: String| matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "1");
         if let Some(v) = get("auth", "tenant_id") {
             s.tenant_id = v;
         }
@@ -161,13 +166,13 @@ impl Settings {
             s.client_id = v;
         }
         if let Some(v) = get("auth", "remember_sign_in") {
-            s.remember_sign_in = matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "1");
+            s.remember_sign_in = yes(v);
         }
         if let Some(v) = get("auth", "scopes").filter(|v| !v.is_empty()) {
             s.scopes = v;
         }
         if let Some(v) = get("auth", "app_scopes_offered") {
-            s.app_scopes_offered = matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "1");
+            s.app_scopes_offered = yes(v);
         }
         if let Some(v) = get("cloud", "authority_host").filter(|v| !v.is_empty()) {
             s.authority_host = v.trim_end_matches('/').to_string();
@@ -203,7 +208,7 @@ impl Settings {
             s.db_name = v;
         }
         if let Some(v) = get("mariadb", "tls") {
-            s.db_tls = matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "1");
+            s.db_tls = yes(v);
         }
         if let Some(v) = get("interface", "language").filter(|v| !v.is_empty()) {
             s.language = v;
@@ -211,14 +216,20 @@ impl Settings {
         if let Some(v) = get("interface", "translation_model") {
             s.translation_model = v;
         }
-        Ok(s)
+        s
     }
 
     pub fn save(&self) -> Result<PathBuf> {
         let dir = config_dir();
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         let path = settings_path();
-        let text = format!(
+        write_file(&path, self.to_ini().as_bytes(), false).with_context(|| format!("writing {}", path.display()))?;
+        Ok(path)
+    }
+
+    /// The text of `settings.ini`. Every setting must be here and in [`Settings::from_ini`].
+    fn to_ini(&self) -> String {
+        format!(
             "; Graphical Cloud Management settings\n\
              ; The app registration must allow public client flows (device code).\n\
              [auth]\n\
@@ -278,9 +289,7 @@ impl Settings {
             self.db_tls,
             self.language.trim(),
             self.translation_model.trim(),
-        );
-        write_file(&path, text.as_bytes(), false).with_context(|| format!("writing {}", path.display()))?;
-        Ok(path)
+        )
     }
 }
 
@@ -305,6 +314,36 @@ fn parse_ini(text: &str) -> BTreeMap<(String, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_setting_is_saved_and_read_back() {
+        // Every field is named (so a new one must be added here) and differs from its default,
+        // so one left out of either side fails.
+        let changed = Settings {
+            tenant_id: "tenant".into(),
+            client_id: "client".into(),
+            remember_sign_in: !Settings::default().remember_sign_in,
+            scopes: "User.Read".into(),
+            app_scopes_offered: !Settings::default().app_scopes_offered,
+            authority_host: "https://login.example".into(),
+            graph_endpoint: "https://graph.example".into(),
+            exchange_endpoint: "https://outlook.example".into(),
+            exchange_scopes: "https://outlook.example/.default".into(),
+            log_level: "trace".into(),
+            update_check: !Settings::default().update_check,
+            skipped_version: "9.9.9".into(),
+            db_host: "db.example".into(),
+            db_port: 3307,
+            db_user: "exporter".into(),
+            db_name: "entra".into(),
+            db_tls: !Settings::default().db_tls,
+            language: "cy".into(),
+            translation_model: "model".into(),
+        };
+        let defaults = Settings::default();
+        assert_eq!(Settings::from_ini(&changed.to_ini()), changed);
+        assert_eq!(Settings::from_ini(&defaults.to_ini()), defaults);
+    }
 
     #[test]
     fn parses_sections_and_comments() {

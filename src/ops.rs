@@ -336,17 +336,21 @@ impl App {
 
     // ----- users ---------------------------------------------------------
 
-    fn new_user(&mut self) {
+    /// The tenant's domains to choose from, or a text field when they aren't known.
+    pub fn domain_field(&self) -> Field {
         let domains: Vec<(String, String)> = self.domains.iter().map(|d| (d.clone(), format!("@{d}"))).collect();
-        let mut form = Form::new(&t("user.new_title"), &t("dialog.create"))
-            .field(Field::text("displayName", &t("field.display_name"), "").required())
-            .field(Field::text("alias", &t("field.user_name"), "").required());
-        form = if domains.is_empty() {
-            form.field(Field::text("domain", &t("field.domain"), ""))
+        if domains.is_empty() {
+            Field::text("domain", &t("field.domain"), "")
         } else {
-            form.field(Field::choice("domain", &t("field.domain"), domains, 0))
-        };
-        let form = form
+            Field::choice("domain", &t("field.domain"), domains, 0)
+        }
+    }
+
+    fn new_user(&mut self) {
+        let form = Form::new(&t("user.new_title"), &t("dialog.create"))
+            .field(Field::text("displayName", &t("field.display_name"), "").required())
+            .field(Field::text("alias", &t("field.user_name"), "").required())
+            .field(self.domain_field())
             .field(Field::text("givenName", &t("field.first_name"), ""))
             .field(Field::text("surname", &t("field.last_name"), ""))
             .field(Field::text("jobTitle", &t("field.job_title"), ""))
@@ -357,17 +361,11 @@ impl App {
             .field(Field::check("enabled", &t("field.account_enabled"), true))
             .intro(&t("user.new_intro"))
             .on_submit(|app, f| {
-                let domain = match f.choice("domain") {
-                    d if !d.is_empty() => d,
-                    _ => f.text("domain"),
-                };
                 let alias = f.text("alias");
                 if let Some(problem) = alias_problem(&alias) {
                     return Err(problem);
                 }
-                if domain.is_empty() {
-                    return Err(tf("form.required", &[("field", &t("field.domain"))]));
-                }
+                let domain = chosen_domain(f)?;
                 let password = f.raw("password");
                 if let Some(problem) = password_problem(&password) {
                     return Err(problem);
@@ -611,22 +609,13 @@ impl App {
     }
 
     pub fn pick_user_or_group(&mut self, title: &str, on_pick: impl FnOnce(&mut App, PickItem) + 'static) {
-        let fetch = |g: &Graph, q: &str| {
-            let mut items = search_users(g, q)?;
-            items.extend(search_groups(g, q)?);
-            Ok(items)
-        };
+        let fetch = |g: &Graph, q: &str| search_together(g, q, &[search_users, search_groups]);
         self.push(Dialog::Picker(Picker::new(title, &t("pick.search"), true, fetch, on_pick)));
     }
 
     /// Users, groups and devices (anything that can be a group member).
     pub fn pick_principal(&mut self, title: &str, on_pick: impl FnOnce(&mut App, PickItem) + 'static) {
-        let fetch = |g: &Graph, q: &str| {
-            let mut items = search_users(g, q)?;
-            items.extend(search_groups(g, q)?);
-            items.extend(search_devices(g, q)?);
-            Ok(items)
-        };
+        let fetch = |g: &Graph, q: &str| search_together(g, q, &[search_users, search_groups, search_devices]);
         self.push(Dialog::Picker(Picker::new(title, &t("pick.search"), true, fetch, on_pick)));
     }
 
@@ -706,6 +695,33 @@ fn search(g: &Graph, path: &str, icon: &str, detail: &str) -> anyhow::Result<Vec
         .collect())
 }
 
+/// The domain picked, or typed, in a form with [`App::domain_field`].
+pub fn chosen_domain(f: &Form) -> Result<String, String> {
+    let domain = match f.choice("domain") {
+        d if !d.is_empty() => d,
+        _ => f.text("domain"),
+    };
+    if domain.is_empty() {
+        return Err(tf("form.required", &[("field", &t("field.domain"))]));
+    }
+    Ok(domain)
+}
+
+type Search = fn(&Graph, &str) -> anyhow::Result<Vec<PickItem>>;
+
+/// Runs the searches at the same time, so a picker waits for the slowest rather than for them
+/// all one after another, and keeps their results in order.
+fn search_together(g: &Graph, q: &str, searches: &[Search]) -> anyhow::Result<Vec<PickItem>> {
+    std::thread::scope(|t| {
+        let running: Vec<_> = searches.iter().map(|search| t.spawn(move || search(g, q))).collect();
+        let mut items = Vec::new();
+        for search in running {
+            items.extend(crate::security::join(search)?);
+        }
+        Ok(items)
+    })
+}
+
 fn search_users(g: &Graph, q: &str) -> anyhow::Result<Vec<PickItem>> {
     let fields = ["displayName", "userPrincipalName", "mail"];
     search(g, &search_path("users", "id,displayName,userPrincipalName", &fields, 50, q), "👤", "userPrincipalName")
@@ -757,18 +773,6 @@ pub fn generate_password() -> String {
     String::from_utf8(chars).unwrap_or_default()
 }
 
-pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (yoe + era * 400 + i64::from(m <= 2), m, d)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,13 +786,6 @@ mod tests {
              or startswith(mail,'O%27%27Neil')&$select=id,displayName,userPrincipalName&$top=50"
         );
         assert_eq!(search_path("devices", "id,displayName", &["displayName"], 25, ""), "/devices?$select=id,displayName&$top=25");
-    }
-
-    #[test]
-    fn civil_dates() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(19_723), (2024, 1, 1));
-        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
     }
 
     #[test]

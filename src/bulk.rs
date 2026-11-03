@@ -252,8 +252,10 @@ pub fn parse_users(table: &Table, domains: &[String], existing: &HashSet<String>
             } else {
                 None
             };
-            seen.entry(upn.to_lowercase()).or_insert(*line);
+            // Only a row that will be created makes later rows for the same user duplicates, so
+            // a corrected row after a rejected one is still created.
             if error.is_none() {
+                seen.insert(upn.to_lowercase(), *line);
                 let mut body = json!({
                     "accountEnabled": enabled.unwrap_or(true),
                     "displayName": display_name,
@@ -855,6 +857,15 @@ mod tests {
             ]
         );
         assert!(parse_users(&table("Name,Email\nAnn,ann@contoso.com\n"), &domains, &existing).is_err());
+    }
+
+    #[test]
+    fn a_corrected_row_after_a_rejected_one_is_created() {
+        let t = table("Display name,User name,Password\nAnn,ann@contoso.com,short\nAnn,ann@contoso.com,\nAnn,ANN@contoso.com,\n");
+        let (users, _) = parse_users(&t, &["contoso.com".to_string()], &HashSet::new()).unwrap();
+        assert_eq!(users[0].error.as_deref(), Some("The password must be 8 to 256 characters."));
+        assert_eq!(users[1].error, None);
+        assert_eq!(users[2].error.as_deref(), Some("Same user principal name as line 3"));
     }
 
     #[test]

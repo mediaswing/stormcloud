@@ -123,9 +123,10 @@ impl Graph {
         self.list_inner(path, false)
     }
 
-    /// GET a collection using advanced query capabilities (`ConsistencyLevel: eventual`).
-    pub fn list_advanced(&self, path: &str) -> Result<Vec<Value>> {
-        self.list_inner(path, true).map(|(items, _)| items)
+    /// GET a collection using advanced query capabilities (`ConsistencyLevel: eventual`), also
+    /// saying whether the list stopped at [`MAX_ITEMS`] with more to come.
+    pub fn list_advanced_capped(&self, path: &str) -> Result<(Vec<Value>, bool)> {
+        self.list_inner(path, true)
     }
 
     fn list_inner(&self, path: &str, eventual: bool) -> Result<(Vec<Value>, bool)> {

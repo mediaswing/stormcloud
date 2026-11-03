@@ -89,6 +89,22 @@ struct Tokens {
     /// Keep the refresh token on disk. Held with the tokens, so a refresh finishing on another
     /// thread can't write the file back after it was turned off.
     remember: bool,
+    /// Counts sign-ins and sign-outs. A token request remembers it when it starts, so tokens it
+    /// gets after the user signed out, or in as someone else, are thrown away.
+    generation: u64,
+}
+
+impl Tokens {
+    /// Forgets the sign-in, so tokens still on their way are thrown away.
+    fn forget(&mut self) {
+        *self = Tokens { remember: self.remember, generation: self.generation + 1, ..Default::default() };
+    }
+
+    /// The access token for `api`, if it isn't close to expiry.
+    fn fresh(&self, api: Api) -> Option<String> {
+        let (at, exp) = self.access.get(&api)?;
+        (*exp > Instant::now() + Duration::from_secs(120)).then(|| at.clone())
+    }
 }
 
 pub struct Auth {
@@ -97,6 +113,9 @@ pub struct Auth {
     tokens: Mutex<Tokens>,
     /// The scopes asked for, which start as `settings.scopes` and grow when more are granted.
     scopes: Mutex<String>,
+    /// Held while refreshing an access token, so threads that need one at the same time make
+    /// one request between them rather than one each.
+    refreshing: Mutex<()>,
 }
 
 impl Auth {
@@ -116,6 +135,7 @@ impl Auth {
             http,
             tokens: Mutex::new(Tokens { refresh_token, remember, ..Default::default() }),
             scopes,
+            refreshing: Mutex::new(()),
         }
     }
 
@@ -223,12 +243,16 @@ impl Auth {
                 }
                 let tr = resp.json()?;
                 // Whoever signed in may not be who was signed in before, so access tokens for
-                // other APIs, from the old sign-in, must not be used with the new one.
-                let mut t = self.tokens.lock().unwrap();
-                t.access.clear();
-                t.granted.clear();
-                drop(t);
-                self.store(dc.api, tr);
+                // other APIs, and refreshes still on their way, from the old sign-in must not be
+                // used with the new one.
+                let generation = {
+                    let mut t = self.tokens.lock().unwrap();
+                    t.access.clear();
+                    t.granted.clear();
+                    t.generation += 1;
+                    t.generation
+                };
+                self.store(dc.api, tr, generation)?;
                 log::info!("Device code sign-in completed");
                 return Ok(());
             }
@@ -247,7 +271,7 @@ impl Auth {
         }
     }
 
-    fn refresh(&self, api: Api, refresh_token: &str) -> Result<()> {
+    fn refresh(&self, api: Api, refresh_token: &str, generation: u64) -> Result<()> {
         log::debug!("Refreshing {api:?} access token");
         let scopes = self.scopes_with(api, &[]);
         let resp = self
@@ -277,13 +301,15 @@ impl Auth {
                 }
                 bail!(describe_error(text));
             }
-            log::warn!("Token refresh rejected; discarding cached sign-in: {text}");
             let mut t = self.tokens.lock().unwrap();
-            *t = Tokens { remember: t.remember, ..Default::default() };
-            let _ = fs::remove_file(token_path());
+            if t.generation == generation {
+                log::warn!("Token refresh rejected; discarding cached sign-in: {text}");
+                t.forget();
+                let _ = fs::remove_file(token_path());
+            }
             bail!(describe_error(text));
         }
-        self.store(api, resp.json()?);
+        self.store(api, resp.json()?, generation)?;
         log::debug!("{api:?} access token refreshed");
         Ok(())
     }
@@ -298,7 +324,11 @@ impl Auth {
     /// Returns true when they were granted (and adds them), or false when they need consent,
     /// leaving the sign-in as it was.
     pub fn try_add_scopes(&self, extra: &[String]) -> Result<bool> {
-        let rt = self.tokens.lock().unwrap().refresh_token.clone().ok_or_else(|| anyhow!(t("auth.not_signed_in")))?;
+        let (rt, generation) = {
+            let t = self.tokens.lock().unwrap();
+            (t.refresh_token.clone(), t.generation)
+        };
+        let rt = rt.ok_or_else(|| anyhow!(t("auth.not_signed_in")))?;
         let scopes = self.scopes_with(Api::Graph, extra);
         log::debug!("Asking for more scopes: [{}]", extra.join(" "));
         let resp = self
@@ -321,7 +351,7 @@ impl Auth {
             log::warn!("Asking for more scopes failed with {status}: {text}");
             bail!(tf("auth.more_failed", &[("status", &status), ("error", &describe_error(text))]));
         }
-        self.store(Api::Graph, resp.json()?);
+        self.store(Api::Graph, resp.json()?, generation)?;
         self.add_scopes(extra);
         log::info!("Granted more scopes: [{}]", extra.join(" "));
         Ok(true)
@@ -347,8 +377,15 @@ impl Auth {
         }
     }
 
-    fn store(&self, api: Api, tr: TokenResponse) {
-        let mut t = self.tokens.lock().unwrap();
+    /// Keeps the tokens from a request made during sign-in `generation`, or fails if the user has
+    /// signed out or in again since it was made.
+    fn store(&self, api: Api, tr: TokenResponse, generation: u64) -> Result<()> {
+        let mut tokens = self.tokens.lock().unwrap();
+        if tokens.generation != generation {
+            log::info!("Not keeping {api:?} tokens asked for before signing out or in again");
+            bail!(t("auth.not_signed_in"));
+        }
+        let t = &mut *tokens;
         t.granted.insert(api, tr.scope);
         t.access.insert(api, (tr.access_token, Instant::now() + Duration::from_secs(tr.expires_in)));
         if let Some(rt) = tr.refresh_token {
@@ -357,21 +394,26 @@ impl Auth {
             }
             t.refresh_token = Some(rt);
         }
+        Ok(())
     }
 
     /// Returns a valid access token for `api`, refreshing it if it is close to expiry. Fails
     /// with [`NeedsConsent`] when the sign-in hasn't been granted that API.
     pub fn token_for(&self, api: Api) -> Result<String> {
-        let refresh_token = {
+        if let Some(at) = self.tokens.lock().unwrap().fresh(api) {
+            return Ok(at);
+        }
+        // Threads that waited here find the token the first one got.
+        let _refreshing = self.refreshing.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (refresh_token, generation) = {
             let t = self.tokens.lock().unwrap();
-            if let Some((at, exp)) = t.access.get(&api)
-                && *exp > Instant::now() + Duration::from_secs(120) {
-                    return Ok(at.clone());
-                }
-            t.refresh_token.clone()
+            if let Some(at) = t.fresh(api) {
+                return Ok(at);
+            }
+            (t.refresh_token.clone(), t.generation)
         };
         let rt = refresh_token.ok_or_else(|| anyhow!(t("auth.not_signed_in")))?;
-        self.refresh(api, &rt)?;
+        self.refresh(api, &rt, generation)?;
         self.tokens
             .lock()
             .unwrap()
@@ -383,8 +425,7 @@ impl Auth {
 
     pub fn sign_out(&self) {
         log::info!("Signing out; clearing cached tokens");
-        let mut t = self.tokens.lock().unwrap();
-        *t = Tokens { remember: t.remember, ..Default::default() };
+        self.tokens.lock().unwrap().forget();
         let _ = fs::remove_file(token_path());
     }
 }
@@ -437,6 +478,20 @@ mod tests {
         assert_eq!(tr.scope, "User.Read AuditLog.Read.All");
         let tr: TokenResponse = serde_json::from_str(r#"{"access_token":"a","expires_in":3600}"#).unwrap();
         assert!(tr.scope.is_empty());
+    }
+
+    #[test]
+    fn tokens_from_before_signing_out_are_thrown_away() {
+        let auth = Auth::new(Settings { remember_sign_in: false, ..Settings::default() }, reqwest::blocking::Client::new());
+        let tr = || serde_json::from_str::<TokenResponse>(r#"{"access_token":"a","expires_in":3600,"refresh_token":"r"}"#).unwrap();
+        let before = auth.tokens.lock().unwrap().generation;
+        auth.store(Api::Graph, tr(), before).unwrap();
+        assert!(auth.has_refresh_token());
+        auth.sign_out();
+        // A refresh that started before signing out finishes afterwards.
+        assert!(auth.store(Api::Graph, tr(), before).is_err());
+        assert!(!auth.has_refresh_token());
+        assert!(auth.tokens.lock().unwrap().fresh(Api::Graph).is_none());
     }
 
     #[cfg(unix)]

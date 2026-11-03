@@ -1448,7 +1448,7 @@ impl App {
             _ => {}
         }
         // Type-ahead: jump to the next item whose name starts with the typed character.
-        if let Some(t) = typed.filter(|t| t.trim().len() == 1)
+        if let Some(t) = typed.filter(|t| t.trim().chars().count() == 1)
             && let Some(p) = self.list.next_starting_with(rows_of(&self.data, self.node), cols[0].get, &t) {
                 self.set_sel(p);
             }
