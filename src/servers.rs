@@ -63,6 +63,68 @@ pub enum ServerSystem {
     Windows,
 }
 
+impl ServerSystem {
+    /// The system a saved row is for.
+    fn of(row: &Value) -> ServerSystem {
+        serde_json::from_value(row["system"].clone()).unwrap_or_default()
+    }
+
+    /// The value the form's System choice and `servers.json` use.
+    fn id(self) -> &'static str {
+        match self {
+            ServerSystem::Linux => "linux",
+            ServerSystem::Windows => "windows",
+        }
+    }
+
+    /// The command a check runs. Its script goes in on standard input, so it needs no quoting
+    /// for the user's shell.
+    fn command(self) -> String {
+        match self {
+            ServerSystem::Linux => "sh -s".to_string(),
+            // OpenSSH on Windows runs commands with cmd.exe, or PowerShell if that is made the
+            // default shell. An encoded command reads the same in both, and reads the script
+            // from standard input, as Ansible does over SSH.
+            ServerSystem::Windows => format!("powershell.exe -NoProfile -NonInteractive -EncodedCommand {}", encode_command(WINDOWS_BOOTSTRAP)),
+        }
+    }
+
+    fn script(self) -> &'static str {
+        match self {
+            ServerSystem::Linux => REPORT_SCRIPT,
+            ServerSystem::Windows => WINDOWS_SCRIPT,
+        }
+    }
+
+    /// The line the output must contain to show the script ran.
+    fn marker(self) -> &'static str {
+        match self {
+            ServerSystem::Linux => "@@uname",
+            ServerSystem::Windows => "@@windows",
+        }
+    }
+
+    fn parse(self, text: &str) -> Report {
+        match self {
+            ServerSystem::Linux => parse_report(text),
+            ServerSystem::Windows => parse_windows_report(text),
+        }
+    }
+
+    /// The catalogue key to use of a text that reads differently for each system.
+    fn pick(self, linux: &'static str, windows: &'static str) -> &'static str {
+        match self {
+            ServerSystem::Linux => linux,
+            ServerSystem::Windows => windows,
+        }
+    }
+
+    /// The system's name as the form and General tab show it.
+    fn name(self) -> String {
+        t(self.pick("server.system_linux", "server.system_windows"))
+    }
+}
+
 /// How to reach a server. Rows of the list hold these fields and the last check's results.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Server {
@@ -340,25 +402,7 @@ async fn sign_in(session: &mut client::Handle<Verifier>, server: &Server, secret
     }
     match server.auth {
         AuthMethod::Password => Err(BadSecret(t("server.password_rejected")).into()),
-        AuthMethod::Key => bail!(t(match server.system {
-            ServerSystem::Linux => "server.key_rejected",
-            ServerSystem::Windows => "server.key_rejected_windows",
-        })),
-    }
-}
-
-/// The command a check runs, and the line its output must contain to show the script ran.
-fn report_command(system: ServerSystem) -> (String, &'static str) {
-    match system {
-        // The script goes in on standard input, so it needs no quoting for the user's shell.
-        ServerSystem::Linux => ("sh -s".to_string(), "@@uname"),
-        // OpenSSH on Windows runs commands with cmd.exe, or PowerShell if that is made the
-        // default shell. An encoded command reads the same in both, and reads the script from
-        // standard input, as Ansible does over SSH.
-        ServerSystem::Windows => (
-            format!("powershell.exe -NoProfile -NonInteractive -EncodedCommand {}", encode_command(WINDOWS_BOOTSTRAP)),
-            "@@windows",
-        ),
+        AuthMethod::Key => bail!(t(server.system.pick("server.key_rejected", "server.key_rejected_windows"))),
     }
 }
 
@@ -367,16 +411,33 @@ const WINDOWS_BOOTSTRAP: &str = "$ProgressPreference = 'SilentlyContinue'; Invok
 
 /// A command as `-EncodedCommand` takes it: base64 of its UTF-16LE text.
 fn encode_command(command: &str) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    use base64::Engine;
     let bytes: Vec<u8> = command.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
-        for i in 0..4 {
-            out.push(if i <= chunk.len() { ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
-        }
-    }
-    out
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// The first line of what the server said on standard error. PowerShell writes its errors there
+/// as CLIXML when it isn't in a console, so the text of those is taken out of the XML.
+fn first_error_line(stderr: &str) -> String {
+    let text = match stderr.trim_start().strip_prefix("#< CLIXML") {
+        None => stderr.to_string(),
+        Some(xml) => xml
+            .split("<S S=\"Error\">")
+            .skip(1)
+            .filter_map(|part| part.split_once("</S>").map(|(text, _)| text))
+            .map(|text| {
+                text.replace("_x000D_", "")
+                    .replace("_x000A_", "\n")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                    .replace("&amp;", "&")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string()
 }
 
 /// Signs in to the server, trusting the host keys in `known_hosts`, and returns what
@@ -408,13 +469,8 @@ async fn fetch(server: &Server, secret: Option<&str>, known_hosts: Vec<PathBuf>)
     sign_in(&mut session, server, secret).await?;
 
     let mut channel = session.channel_open_session().await?;
-    let (command, marker) = report_command(server.system);
-    let script = match server.system {
-        ServerSystem::Linux => REPORT_SCRIPT,
-        ServerSystem::Windows => WINDOWS_SCRIPT,
-    };
-    channel.exec(true, command).await?;
-    channel.data_bytes(script.as_bytes()).await?;
+    channel.exec(true, server.system.command()).await?;
+    channel.data_bytes(server.system.script().as_bytes()).await?;
     channel.eof().await?;
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let mut exit = None;
@@ -431,16 +487,10 @@ async fn fetch(server: &Server, secret: Option<&str>, known_hosts: Vec<PathBuf>)
     }
     let _ = session.disconnect(Disconnect::ByApplication, "", "en").await;
     let text = String::from_utf8_lossy(&out).into_owned();
-    if !text.contains(marker) {
-        let said = String::from_utf8_lossy(&err);
-        // PowerShell reports errors on standard error as CLIXML when it isn't in a console.
-        let said = said.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("#< CLIXML")).unwrap_or("").to_string();
+    if !text.contains(server.system.marker()) {
+        let said = first_error_line(&String::from_utf8_lossy(&err));
         let exit = exit.map(|c| c.to_string()).unwrap_or_default();
-        let key = match server.system {
-            ServerSystem::Linux => "server.no_shell",
-            ServerSystem::Windows => "server.no_powershell",
-        };
-        bail!(tf(key, &[("exit", &exit), ("error", &said)]));
+        bail!(tf(server.system.pick("server.no_shell", "server.no_shell_windows"), &[("exit", &exit), ("error", &said)]));
     }
     Ok(text)
 }
@@ -482,10 +532,7 @@ fn check_with(server: &Server, secret: Option<String>, known_hosts: Vec<PathBuf>
     let text = runtime
         .block_on(async { tokio::time::timeout(CHECK_TIMEOUT, fetch(server, secret.as_deref(), known_hosts)).await })
         .map_err(|_| anyhow!(t("server.check_timed_out")))??;
-    Ok(match server.system {
-        ServerSystem::Linux => parse_report(&text),
-        ServerSystem::Windows => parse_windows_report(&text),
-    })
+    Ok(server.system.parse(&text))
 }
 
 // ----- the report --------------------------------------------------------------
@@ -613,6 +660,8 @@ $ProgressPreference = 'SilentlyContinue'
 # Written as UTF-8 straight to standard output, whatever the console's code page and width.
 $out = New-Object System.IO.StreamWriter -ArgumentList ([Console]::OpenStandardOutput()), (New-Object System.Text.UTF8Encoding $false)
 $out.NewLine = "`n"
+# So what was gathered still arrives if the script is stopped part way.
+$out.AutoFlush = $true
 function W([string]$s) { $out.WriteLine($s) }
 function Clean([string]$s) { ($s -replace '[\t\r\n]+', ' ').Trim() }
 function Epoch($d) {
@@ -624,7 +673,7 @@ $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 $arch = $env:PROCESSOR_ARCHITEW6432
 if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
 W '@@system'
-W "hostname`t$([Environment]::MachineName)"
+W "hostname`t$([System.Net.Dns]::GetHostName())"
 W "caption`t$(Clean $os.Caption)"
 W "version`t$($os.Version)"
 W "ubr`t$($cv.UBR)"
@@ -653,25 +702,41 @@ W '@@changed'
 $installed = $null
 if ($results) { $installed = $results.LastInstallationSuccessDate }
 if (-not ($installed -is [datetime]) -or $installed.Year -le 1970) {
+  # Hotfixes record the local date, where Windows Update records UTC.
   $installed = (@(Get-HotFix | Where-Object { $_.InstalledOn }) | Sort-Object InstalledOn | Select-Object -Last 1).InstalledOn
+  if ($installed -is [datetime]) { $installed = $installed.ToUniversalTime() }
 }
 Epoch $installed
-# Title, KB articles and whether it is a security update (rated by the MSRC, or classed as one).
+# Title, KB articles and whether it is a security update (rated by the MSRC, or classed as one),
+# then '@@ok' if the whole list was read. The search runs as a job so a slow one can be given up
+# without losing the rest of the report.
 W '@@updates'
-$found = $null
-try {
-  $searcher = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher()
-  $searcher.Online = $false
-  $found = $searcher.Search('IsInstalled=0 and IsHidden=0')
-  foreach ($u in @($found.Updates)) {
-    $security = -not [string]::IsNullOrEmpty($u.MsrcSeverity)
-    foreach ($c in @($u.Categories)) { if ($c.CategoryID -eq '0fa1201d-4330-4fa8-8ae9-b877473b6441') { $security = $true } }
-    $kb = (@($u.KBArticleIDs) | ForEach-Object { "KB$_" }) -join ', '
-    W "$(Clean $u.Title)`t$kb`t$([int]$security)"
-  }
-} catch {}
-# 2 is succeeded and 3 succeeded with errors.
-if ($found -and (2, 3 -contains $found.ResultCode)) { W '@@status 0' } else { W '@@status 1' }
+$job = Start-Job -ScriptBlock {
+  $ErrorActionPreference = 'Stop'
+  try {
+    $searcher = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher()
+    $searcher.Online = $false
+    $found = $searcher.Search('IsInstalled=0 and IsHidden=0')
+    # 2 is succeeded and 3 succeeded with errors.
+    if (2, 3 -notcontains $found.ResultCode) { return }
+    $lines = foreach ($u in @($found.Updates)) {
+      $security = -not [string]::IsNullOrEmpty($u.MsrcSeverity)
+      foreach ($c in @($u.Categories)) { if ($c.CategoryID -eq '0fa1201d-4330-4fa8-8ae9-b877473b6441') { $security = $true } }
+      $kb = (@($u.KBArticleIDs) | ForEach-Object { "KB$_" }) -join ', '
+      "$(($u.Title -replace '[\t\r\n]+', ' ').Trim())`t$kb`t$([int]$security)"
+    }
+    @($lines) + '@@ok'
+  } catch {}
+}
+$lines = @()
+if ($job -and (Wait-Job $job -Timeout 120)) { $lines = @(Receive-Job $job) }
+if ($job) { Remove-Job $job -Force }
+if ($lines.Count -gt 0 -and $lines[-1] -eq '@@ok') {
+  for ($i = 0; $i -lt $lines.Count - 1; $i++) { W $lines[$i] }
+  W '@@status 0'
+} else {
+  W '@@status 1'
+}
 W '@@reboot'
 $reboot = $false
 try { if ((New-Object -ComObject Microsoft.Update.SystemInfo).RebootRequired) { $reboot = $true } } catch {}
@@ -689,6 +754,9 @@ pub struct Update {
     pub installed: String,
     pub available: String,
     pub security: bool,
+    /// The KB articles of a Windows update, which has no version of its own.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kb: String,
 }
 
 /// What a check found. Anything the server didn't say is left empty or `None`.
@@ -771,7 +839,7 @@ fn apt_updates(lines: &[&str]) -> Vec<Update> {
             let available = words.next()?.to_string();
             let installed = line.split_once("from: ").map(|(_, v)| v.trim_end_matches(']').trim().to_string()).unwrap_or_default();
             let security = suites.split(',').any(|s| s.ends_with("-security"));
-            Some(Update { name: name.to_string(), installed, available, security })
+            Some(Update { name: name.to_string(), installed, available, security, ..Default::default() })
         })
         .collect()
 }
@@ -891,20 +959,21 @@ pub fn parse_report(text: &str) -> Report {
                     security: security.contains(&name),
                     name,
                     available,
+                    ..Default::default()
                 })
                 .collect()
         }
         "zypper" => zypper_rows(&updates.lines, "Current Version")
             .into_iter()
             .filter(|c| c.len() >= 6)
-            .map(|c| Update { name: c[2].into(), installed: c[3].into(), available: c[4].into(), security: false })
+            .map(|c| Update { name: c[2].into(), installed: c[3].into(), available: c[4].into(), security: false, ..Default::default() })
             .collect(),
         "pacman" => updates
             .lines
             .iter()
             .filter_map(|l| {
                 let w: Vec<&str> = l.split_whitespace().collect();
-                (w.len() >= 4 && w[2] == "->").then(|| Update { name: w[0].into(), installed: w[1].into(), available: w[3].into(), security: false })
+                (w.len() >= 4 && w[2] == "->").then(|| Update { name: w[0].into(), installed: w[1].into(), available: w[3].into(), security: false, ..Default::default() })
             })
             .collect(),
         "apk" => updates
@@ -914,7 +983,7 @@ pub fn parse_report(text: &str) -> Report {
                 let w: Vec<&str> = l.split_whitespace().collect();
                 (w.len() >= 3 && w[1] == "<").then(|| {
                     let (name, installed) = split_apk(w[0]);
-                    Update { name, installed, available: w[2].into(), security: false }
+                    Update { name, installed, available: w[2].into(), security: false, ..Default::default() }
                 })
             })
             .collect(),
@@ -946,8 +1015,7 @@ fn tab_pair(line: &str) -> (String, String) {
     (a.trim().to_string(), b.trim().to_string())
 }
 
-/// Reads what [`WINDOWS_SCRIPT`] printed. Each pending update's KB articles are kept as its
-/// available version, as Windows updates have no version of their own.
+/// Reads what [`WINDOWS_SCRIPT`] printed.
 pub fn parse_windows_report(text: &str) -> Report {
     let parts = sections(text.trim_start_matches('\u{feff}'));
     let empty = Section::default();
@@ -979,7 +1047,9 @@ pub fn parse_windows_report(text: &str) -> Report {
     r.lists_updated = epoch(&part("lists-updated").lines);
     r.packages_changed = epoch(&part("changed").lines);
 
-    let listed = parts.contains_key("updates") && part("updates").status == Some(0);
+    // Without a successful search on record, the search reads an empty cache and finds nothing,
+    // which doesn't mean the server is up to date.
+    let listed = parts.contains_key("updates") && part("updates").status == Some(0) && r.lists_updated.is_some();
     r.updates = listed.then(|| {
         part("updates")
             .lines
@@ -988,8 +1058,8 @@ pub fn parse_windows_report(text: &str) -> Report {
             .map(|l| {
                 let mut cells = l.split('\t').map(str::trim);
                 let name = cells.next().unwrap_or("").to_string();
-                let available = cells.next().unwrap_or("").to_string();
-                Update { name, installed: String::new(), available, security: cells.next() == Some("1") }
+                let kb = cells.next().unwrap_or("").to_string();
+                Update { name, kb, security: cells.next() == Some("1"), ..Default::default() }
             })
             .collect()
     });
@@ -1068,14 +1138,6 @@ fn sign_in_method(v: &Value) -> String {
     }
 }
 
-fn is_windows(v: &Value) -> bool {
-    v["system"] == "windows"
-}
-
-fn system_name(v: &Value) -> String {
-    t(if is_windows(v) { "server.system_windows" } else { "server.system_linux" })
-}
-
 /// The content of a tab of a server's property sheet, from its last check.
 pub fn tab_body(kind: TabKind, v: &Value) -> TabBody {
     let r = report(v);
@@ -1085,9 +1147,9 @@ pub fn tab_body(kind: TabKind, v: &Value) -> TabBody {
     // Packages and services are kept as [name, version or description] pairs.
     let pairs = |key: &str| -> Vec<Value> { r[key].as_array().cloned().unwrap_or_default() };
     let cells = |p: &Value| vec![p[0].as_str().unwrap_or("").to_string(), p[1].as_str().unwrap_or("").to_string()];
-    let windows = is_windows(v);
-    // Labels that read differently for what Windows reports.
-    let label = |linux: &str, win: &str| t(if windows { win } else { linux });
+    let system = ServerSystem::of(v);
+    let windows = system == ServerSystem::Windows;
+    let label = |linux, windows| t(system.pick(linux, windows));
     match kind {
         TabKind::Software => table(vec!["col.name", "col.version"], pairs("packages"), cells),
         TabKind::Services => {
@@ -1101,7 +1163,7 @@ pub fn tab_body(kind: TabKind, v: &Value) -> TabBody {
             Some(updates) if windows => table(
                 vec!["col.name", "col.kb_articles", "col.security"],
                 updates.clone(),
-                |u| vec![s(u, "name"), s(u, "available"), yes_no(&u["security"])],
+                |u| vec![s(u, "name"), s(u, "kb"), yes_no(&u["security"])],
             ),
             Some(updates) => table(
                 vec!["col.name", "col.installed_version", "col.available_version", "col.security"],
@@ -1113,7 +1175,7 @@ pub fn tab_body(kind: TabKind, v: &Value) -> TabBody {
             let mut fields = vec![
                 (t("prop.name"), s(v, "name")),
                 (t("prop.host"), s(v, "host")),
-                (t("prop.system"), system_name(v)),
+                (t("prop.system"), system.name()),
                 (t("prop.port"), s(v, "port")),
                 (t("prop.ssh_user"), s(v, "user")),
                 (t("prop.sign_in_method"), sign_in_method(v)),
@@ -1284,7 +1346,7 @@ impl App {
 
     fn confirm_host_key(&mut self, server: Server, key: PublicKey) {
         let text = tf(
-            if server.system == ServerSystem::Windows { "server.trust_text_windows" } else { "server.trust_text" },
+            server.system.pick("server.trust_text", "server.trust_text_windows"),
             &[
                 ("address", &tf("server.address", &[("host", &server.host), ("port", &server.port)])),
                 ("algorithm", &key.algorithm().as_str()),
@@ -1321,12 +1383,13 @@ impl App {
         };
         let field = |f: fn(&Server) -> String, default: String| old.as_ref().map(f).unwrap_or(default);
         let auth_options = vec![("password".to_string(), t("server.auth_password")), ("key".to_string(), t("server.auth_key"))];
-        let system_options = vec![("linux".to_string(), t("server.system_linux")), ("windows".to_string(), t("server.system_windows"))];
-        let is_windows = old.as_ref().is_some_and(|s| s.system == ServerSystem::Windows);
+        let systems = [ServerSystem::Linux, ServerSystem::Windows];
+        let system_options = systems.iter().map(|&s| (s.id().to_string(), s.name())).collect();
+        let system = old.as_ref().map_or(0, |s| systems.iter().position(|&x| x == s.system).unwrap_or(0));
         let form = Form::new(&title, &t(if old.is_some() { "dialog.save" } else { "server.add" }))
             .intro(&t("server.form_intro"))
             .field(Field::text("host", &t("server.field_host"), &field(|s| s.host.clone(), String::new())).required())
-            .field(Field::choice("system", &t("server.field_system"), system_options, is_windows as usize))
+            .field(Field::choice("system", &t("server.field_system"), system_options, system))
             .field(Field::text("port", &t("server.field_port"), &field(|s| s.port.to_string(), DEFAULT_PORT.to_string())).required())
             .field(Field::text("user", &t("server.field_user"), &field(|s| s.user.clone(), String::new())).required())
             .field(Field::text("name", &t("server.field_name"), &field(|s| s.name.clone(), String::new())))
@@ -1355,7 +1418,7 @@ impl App {
                     user: f.text("user"),
                     auth,
                     key_path: if auth == AuthMethod::Key { key_path } else { String::new() },
-                    system: if f.choice("system") == "windows" { ServerSystem::Windows } else { ServerSystem::Linux },
+                    system: systems.into_iter().find(|s| s.id() == f.choice("system")).unwrap_or_default(),
                 };
                 let row = serde_json::to_value(&server).map_err(|e| e.to_string())?;
                 match &old {
@@ -1436,7 +1499,7 @@ mod tests {
         assert_eq!(r.services[0], ("ssh".to_string(), "OpenBSD Secure Shell server".to_string()));
         let updates = r.updates.unwrap();
         assert_eq!(updates.len(), 2);
-        assert_eq!(updates[0], Update { name: "bash".into(), installed: "5.2.21-2ubuntu4".into(), available: "5.2.21-2ubuntu4.1".into(), security: true });
+        assert_eq!(updates[0], Update { name: "bash".into(), installed: "5.2.21-2ubuntu4".into(), available: "5.2.21-2ubuntu4.1".into(), security: true, ..Default::default() });
         assert!(!updates[1].security);
         assert_eq!(r.security_updates, Some(1));
         assert_eq!(r.reboot_required, Some(true));
@@ -1483,7 +1546,7 @@ mod tests {
         assert_eq!(r.services.len(), 2);
         assert_eq!(r.packages[0], ("busybox".to_string(), "1.36.1-r29".to_string()));
         let updates = r.updates.unwrap();
-        assert_eq!(updates, vec![Update { name: "busybox".into(), installed: "1.36.1-r29".into(), available: "1.36.1-r30".into(), security: false }]);
+        assert_eq!(updates, vec![Update { name: "busybox".into(), installed: "1.36.1-r29".into(), available: "1.36.1-r30".into(), security: false, ..Default::default() }]);
     }
 
     #[test]
@@ -1618,7 +1681,8 @@ mod tests {
         assert!(!r.services_are_processes);
         let updates = r.updates.unwrap();
         assert_eq!(updates.len(), 2);
-        assert_eq!(updates[0].available, "KB5044281");
+        assert_eq!(updates[0].kb, "KB5044281");
+        assert_eq!(updates[0].available, "");
         assert!(updates[0].security);
         assert_eq!(updates[1].name, "Update for Windows Defender Antivirus antimalware platform");
         assert!(!updates[1].security);
@@ -1626,6 +1690,21 @@ mod tests {
         assert_eq!(r.reboot_required, Some(false));
         assert_eq!(r.lists_updated.as_deref(), Some("2025-10-10T08:53:20Z"));
         assert_eq!(r.packages_changed.as_deref(), Some("2025-10-09T08:53:20Z"));
+    }
+
+    #[test]
+    fn windows_updates_without_a_search_on_record_are_unknown() {
+        let r = parse_windows_report(&WINDOWS.replace("@@lists-updated\n1760086400\n", "@@lists-updated\n"));
+        assert_eq!(r.updates, None);
+        assert_eq!(r.security_updates, None);
+    }
+
+    #[test]
+    fn reads_powershell_errors_out_of_clixml() {
+        let err = "#< CLIXML\r\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\"><S S=\"Error\">Invoke-Expression : Missing &apos;)&apos; in method call._x000D__x000A_</S><S S=\"Error\">At line:1 char:1_x000D__x000A_</S></Objs>";
+        assert_eq!(first_error_line(err), "Invoke-Expression : Missing ')' in method call.");
+        assert_eq!(first_error_line("\n  sh: not found\nmore"), "sh: not found");
+        assert_eq!(first_error_line(""), "");
     }
 
     #[test]
@@ -1644,11 +1723,13 @@ mod tests {
         assert_eq!(encode_command("Man"), "TQBhAG4A");
         assert_eq!(encode_command("M"), "TQA=");
         assert_eq!(encode_command("Ma"), "TQBhAA==");
-        let (command, marker) = report_command(ServerSystem::Windows);
+        let command = ServerSystem::Windows.command();
         assert!(command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand "));
         assert!(command.ends_with(&encode_command(WINDOWS_BOOTSTRAP)));
-        assert_eq!(marker, "@@windows");
-        assert_eq!(report_command(ServerSystem::Linux), ("sh -s".to_string(), "@@uname"));
+        assert_eq!(ServerSystem::Linux.command(), "sh -s");
+        for system in [ServerSystem::Linux, ServerSystem::Windows] {
+            assert!(system.script().contains(system.marker()));
+        }
         assert!(WINDOWS_SCRIPT.is_ascii());
         for part in ["@@windows", "@@system", "@@packages", "@@services", "@@updates", "@@reboot", "@@end"] {
             assert!(WINDOWS_SCRIPT.contains(&format!("W '{part}'")), "{part}");
@@ -1657,6 +1738,8 @@ mod tests {
 
     #[test]
     fn windows_labels_follow_the_system() {
+        assert_eq!(ServerSystem::of(&json!({ "system": "windows" })), ServerSystem::Windows);
+        assert_eq!(ServerSystem::of(&json!({})), ServerSystem::Linux);
         let row = json!({ "id": "a", "system": "windows", "report": parse_windows_report(WINDOWS) });
         let TabBody::Fields(fields) = tab_body(TabKind::General, &row) else { panic!("fields") };
         let has = |label: &str, value: &str| fields.iter().any(|(l, v)| l == label && v == value);

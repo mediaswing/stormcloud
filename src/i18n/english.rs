@@ -1490,7 +1490,7 @@ pub const ENGLISH: &[(&str, &str)] = &[
         "The server did not run the check. It needs a Unix shell (sh), as Linux servers have. If it runs Windows, choose Windows as its system. Exit status {exit}: {error}",
     ),
     (
-        "server.no_powershell",
+        "server.no_shell_windows",
         "The server did not run the check. It needs Windows PowerShell, which Windows includes. If it runs Linux, choose Linux or Unix as its system. Exit status {exit}: {error}",
     ),
     ("server.host_key_unknown", "The server's host key is not trusted yet."),

@@ -8,6 +8,7 @@ repository = "https://github.com/mediaswing/stormcloud"
 
 [dependencies]
 anyhow = "1.0.104"
+base64 = "0.22.1"
 csv = "1.4.0"
 dirs = "7.0.0"
 eframe = "0.36.2"
