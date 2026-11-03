@@ -4,6 +4,16 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Remote Servers:** Windows servers can be kept watch over too, by SSH to OpenSSH Server.
+  Choose **Windows** as the server's system when adding or editing it. A read-only Windows
+  PowerShell script reports the Windows version and build, installed applications, running
+  services, pending and security updates from Windows Update's last search, and whether a
+  restart is needed. Servers already in the list stay Linux servers.
+
 ## [1.6.0] - 2026-10-22
 
 Adds right-click menus throughout, and makes the app sturdier: large CSV imports no longer freeze

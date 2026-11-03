@@ -175,7 +175,7 @@ pub const ENGLISH: &[(&str, &str)] = &[
     ("node.remote_servers_list", "servers"),
     (
         "node.remote_servers_about",
-        "Keep watch over Linux servers by SSH: operating system, installed and running software, and pending updates",
+        "Keep watch over Linux and Windows servers by SSH: operating system, installed and running software, and pending updates",
     ),
     // Column titles. Database exports name their columns after the English.
     ("col.display_name", "Display name"),
@@ -221,6 +221,7 @@ pub const ENGLISH: &[(&str, &str)] = &[
     ("col.installed_version", "Installed version"),
     ("col.available_version", "Available version"),
     ("col.security", "Security"),
+    ("col.kb_articles", "KB articles"),
     // Values
     ("value.yes", "Yes"),
     ("value.no", "No"),
@@ -599,14 +600,19 @@ pub const ENGLISH: &[(&str, &str)] = &[
     ("prop.kernel", "Kernel"),
     ("prop.architecture", "Architecture"),
     ("prop.uptime", "Up for"),
+    ("prop.system", "System"),
     ("prop.package_manager", "Package manager"),
+    ("prop.updates_from", "Updates from"),
     ("prop.installed_packages", "Installed packages"),
+    ("prop.installed_apps", "Installed applications"),
     ("prop.running_services", "Running services"),
     ("prop.running_processes", "Running programs"),
     ("prop.pending_updates", "Pending updates"),
     ("prop.reboot_required", "Restart needed"),
     ("prop.lists_updated", "Package lists last refreshed"),
     ("prop.packages_changed", "Packages last changed"),
+    ("prop.updates_searched", "Last searched for updates"),
+    ("prop.updates_installed", "Updates last installed"),
     ("prop.join_type", "Join type"),
     ("prop.manufacturer", "Manufacturer"),
     ("prop.model", "Model"),
@@ -1431,9 +1437,12 @@ pub const ENGLISH: &[(&str, &str)] = &[
     ("server.add", "Add"),
     (
         "server.form_intro",
-        "The server is checked over SSH with read-only commands; nothing is run with sudo or changed. Passwords and key passphrases are never saved: you are asked for one the first time the server is checked, and it is kept until you close the app.",
+        "The server is checked over SSH with read-only commands; nothing is run with sudo or as administrator, or changed. Windows servers need OpenSSH Server turned on. Passwords and key passphrases are never saved: you are asked for one the first time the server is checked, and it is kept until you close the app.",
     ),
     ("server.field_host", "Host name or IP address"),
+    ("server.field_system", "System"),
+    ("server.system_linux", "Linux or Unix"),
+    ("server.system_windows", "Windows"),
     ("server.field_port", "SSH port"),
     ("server.field_user", "User name"),
     ("server.field_name", "Name in the list (optional)"),
@@ -1464,6 +1473,10 @@ pub const ENGLISH: &[(&str, &str)] = &[
     ),
     ("server.password_rejected", "The server did not accept the password."),
     ("server.key_rejected", "The server did not accept the SSH key. Check that its public key is in the user's authorized_keys file."),
+    (
+        "server.key_rejected_windows",
+        "The server did not accept the SSH key. For an administrator, its public key must be in C:\\ProgramData\\ssh\\administrators_authorized_keys, and only Administrators and SYSTEM may have access to that file; for other users, in .ssh\\authorized_keys in their profile.",
+    ),
     ("server.bad_passphrase", "Could not open the key {path}; check the passphrase. ({error})"),
     ("server.bad_key", "Could not open the key {path}: {error}"),
     ("server.needs_secret", "A password or passphrase is needed."),
@@ -1474,7 +1487,11 @@ pub const ENGLISH: &[(&str, &str)] = &[
     ("server.too_much_output", "The server sent far more than expected, so the check was stopped."),
     (
         "server.no_shell",
-        "The server did not run the check. It needs a Unix shell (sh), as Linux servers have. Exit status {exit}: {error}",
+        "The server did not run the check. It needs a Unix shell (sh), as Linux servers have. If it runs Windows, choose Windows as its system. Exit status {exit}: {error}",
+    ),
+    (
+        "server.no_powershell",
+        "The server did not run the check. It needs Windows PowerShell, which Windows includes. If it runs Linux, choose Linux or Unix as its system. Exit status {exit}: {error}",
     ),
     ("server.host_key_unknown", "The server's host key is not trusted yet."),
     (
@@ -1485,6 +1502,10 @@ pub const ENGLISH: &[(&str, &str)] = &[
     (
         "server.trust_text",
         "The app has not connected to {address} before. Its host key is:\n\n{algorithm}\n{fingerprint}\n\nTrust it only if this matches the server's own key, which \"ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub\" shows on the server. Trusting it adds it to the app's known_hosts file.",
+    ),
+    (
+        "server.trust_text_windows",
+        "The app has not connected to {address} before. Its host key is:\n\n{algorithm}\n{fingerprint}\n\nTrust it only if this matches the server's own key, which \"ssh-keygen -lf C:\\ProgramData\\ssh\\ssh_host_ed25519_key.pub\" shows on the server. Trusting it adds it to the app's known_hosts file.",
     ),
     ("server.state_ok", "OK"),
     ("server.state_checking", "Checking…"),
@@ -1498,6 +1519,10 @@ pub const ENGLISH: &[(&str, &str)] = &[
     (
         "server.updates_not_listed",
         "The server's pending updates could not be listed. Its package manager may not be supported, or the listing failed.",
+    ),
+    (
+        "server.updates_not_listed_windows",
+        "The server's pending updates could not be listed from Windows Update. The Windows Update service may be turned off, or the search failed.",
     ),
     ("server.uptime", "{days} d {hours} h"),
     // (end of catalogue)

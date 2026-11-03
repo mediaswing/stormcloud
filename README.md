@@ -14,7 +14,7 @@ and talks to Microsoft Graph directly.
 | **Exchange Online › Mailboxes** | Create shared mailboxes; convert between user and shared mailboxes; set forwarding and automatic replies; give Full Access, Send As and Send on behalf; hide from address lists; delete shared, room and equipment mailboxes |
 | **Exchange Online › Distribution lists** | Create distribution lists and mail-enabled security groups, edit, delete and manage members |
 | **Licences** | View subscriptions, service plans and licensed users; assign or remove licences |
-| **Remote Servers** | Keep watch over Linux servers by SSH, with a password or an SSH key: operating system and kernel, installed applications, running services, pending (and security) updates and whether a restart is needed. Needs no Microsoft sign-in |
+| **Remote Servers** | Keep watch over Linux and Windows servers by SSH, with a password or an SSH key: operating system and kernel, installed applications, running services, pending (and security) updates and whether a restart is needed. Needs no Microsoft sign-in |
 
 ## Setup
 
@@ -293,7 +293,8 @@ of `settings.ini`. The password is asked for each time and never saved.
 ## Remote Servers
 
 **Remote Servers** lists servers you check over SSH. It has nothing to do with Microsoft, so it
-works without signing in. **Add server…** asks for the host, SSH port, user name and how to sign
+works without signing in. **Add server…** asks for the host, whether it runs **Linux or Unix** or
+**Windows**, the SSH port, user name and how to sign
 in: a **password**, or an **SSH key** file such as `~/.ssh/id_ed25519` (OpenSSH, PEM or PKCS#8;
 Ed25519, ECDSA and RSA). **Check now** checks the selected server, and **Refresh** (F5) checks them
 all. **Properties** shows what the last check found, on the **General**, **Installed
@@ -316,10 +317,34 @@ applications**, **Running services** and **Updates** tabs; Refresh there checks 
   needed is known on Ubuntu, on Debian with `unattended-upgrades` or `needrestart` installed, on
   dnf and yum when `needs-restarting` is installed, and on zypper; otherwise it is left blank.
   Running services come from systemd, or, without systemd, the list of running programs.
+- **Windows servers** are checked with a Windows PowerShell script (`WINDOWS_SCRIPT` in
+  `src/servers.rs`; Windows Server 2012 R2 and later), which also only reads. Installed
+  applications are those in Programs and Features, and pending updates are those Windows Update
+  found in its last search on the server, with security updates counted; the app doesn't search
+  again, and the General tab shows when the last search was. Whether a restart is needed comes
+  from Windows Update and Windows servicing.
 - The list and each server's last results are kept in `servers.json` beside `settings.ini`, so
   they are there when the app starts.
 
-Windows servers aren't supported, as the check needs a Unix shell.
+### Setting up a Windows server
+
+Windows servers need **OpenSSH Server**. On Windows Server 2025 it is installed: start the
+**OpenSSH SSH Server** (`sshd`) service and set it to start automatically. On Windows Server 2019
+and 2022, install it first, in PowerShell as an administrator:
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Set-Service sshd -StartupType Automatic
+Start-Service sshd
+```
+
+- Domain accounts sign in as `user@domain` or `DOMAIN\user`.
+- For an SSH key, an administrator's public key goes in
+  `C:\ProgramData\ssh\administrators_authorized_keys`, not their own `.ssh\authorized_keys`, and
+  only Administrators and SYSTEM may have access to that file, or the key is ignored. Other users'
+  keys go in `.ssh\authorized_keys` in their profile.
+- The server's host key fingerprint, to compare when the app asks, is shown on the server by
+  `ssh-keygen -lf C:\ProgramData\ssh\ssh_host_ed25519_key.pub`.
 
 ## Updates
 
