@@ -4,7 +4,11 @@ All notable changes to Graphical Cloud Management are recorded here. The format 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.8.0] - 2026-11-03
+
+Adds keeping watch over Windows servers, and fixes problems found in a review of the whole app,
+among them an export that could remove rows for objects that still exist and a sign-out that
+could be undone by a token refresh.
 
 ### Added
 
@@ -238,7 +242,8 @@ that talks to Microsoft Graph directly.
 - Installers: a Windows MSI that installs without administrator rights, an Ubuntu/Debian .deb
   (Ubuntu 22.04 and later), and a macOS .pkg for Apple Silicon (macOS 11 and later).
 
-[Unreleased]: https://github.com/mediaswing/stormcloud/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/mediaswing/stormcloud/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/mediaswing/stormcloud/releases/tag/v1.8.0
 [1.6.0]: https://github.com/mediaswing/stormcloud/releases/tag/v1.6.0
 [1.5.0]: https://github.com/mediaswing/stormcloud/releases/tag/v1.5.0
 [1.4.0]: https://github.com/mediaswing/stormcloud/releases/tag/v1.4.0
